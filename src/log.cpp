@@ -16,7 +16,13 @@ std::mutex g_mutex;
 std::ofstream g_file;
 
 std::filesystem::path LogPath() {
+#ifdef TMFOXR_LOG_BESIDE_MODULE
+    // On a headset the Wine user profile is inside the host app's private
+    // storage; the game folder is on shared storage where adb can read it.
+    return ModuleFilePath(L"TMFOXR.log");
+#else
     return UserDataFilePath(L"TMFOXR.log");
+#endif
 }
 
 std::string Timestamp() {

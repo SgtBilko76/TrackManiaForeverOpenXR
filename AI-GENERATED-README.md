@@ -145,6 +145,8 @@ To install:
 2. Run `scripts/deploy-quest.sh [/sdcard/Download/TmForever]`. It builds the DLL, pushes `TMFOXR.dll` and `TMFOXR.defaults.ini`, and adds `TMFOXR=TMFOXR.dll` to `ModLoader.ini`.
 3. In WinlatorXR, use DXVK for DirectX and launch `TmForever.exe`. The WinlatorXR screen resolution sets the per-eye resolution (half the width by the full height).
 
+The Quest build writes `TMFOXR.log` beside `TMFOXR.dll` in the game folder, so `adb pull` can reach it. The settings file stays in `Documents\TrackMania`.
+
 `tests/fake_winlatorxr.py` imitates the WinlatorXR side, so the XrAPI build can be tested under desktop Wine.
 
 ## In-headset settings
