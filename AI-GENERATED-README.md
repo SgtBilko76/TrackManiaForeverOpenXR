@@ -141,7 +141,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Screen-space shaders that write `oPos` without a camera matrix (such as the menu background) are rewritten with D3DX so the stereo replay can keep them fixed in the room.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
 - For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
-- The mod requests a square field of view from WinlatorXR (the larger of the two reported angles, for example 108.9° × 108.9°) and renders with it. WinlatorXR's reported FOV and the FOV of its projection layer disagree on which axis is which, which squeezed the image horizontally by about 0.8. `TMFOXR_XRAPI_FOV` overrides the angle.
+- WinlatorXR shows each eye image with square pixels. The mod therefore uses the larger reported angle (for example 108.9°, or `TMFOXR_XRAPI_FOV`) as the vertical FOV, derives the horizontal FOV from the eye image's aspect ratio, and requests both from WinlatorXR. Use a **2:1 WinlatorXR screen size** (2160×1080, 2880×1440 or 3584×1792) for square eyes and the full horizontal FOV; 1920×1080 gives 960×1080 eyes and only about 102° horizontally.
 - `TMFOXR_XRAPI_SYNC_WAIT_MS` (default 14, 0 disables) sets how long a frame may wait for a fresh headset pose. `TMFOXR_XRAPI_DIR` overrides `Z:\tmp\xr` for testing.
 
 Build it on Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
