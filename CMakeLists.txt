@@ -34,7 +34,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(dear_imgui)
 
 if(TMFOXR_VR_BACKEND STREQUAL "XrAPI")
-  set(TMFOXR_BRIDGE_SOURCE src/xrapi_bridge.cpp)
+  set(TMFOXR_BRIDGE_SOURCE src/xrapi_bridge.cpp src/virtual_joypad.cpp)
 else()
   set(TMFOXR_BRIDGE_SOURCE src/vr_bridge.cpp)
 endif()
@@ -69,7 +69,7 @@ target_include_directories(d3d9 PRIVATE
   "${dear_imgui_SOURCE_DIR}/backends"
 )
 if(TMFOXR_VR_BACKEND STREQUAL "XrAPI")
-  target_compile_definitions(d3d9 PRIVATE TMFOXR_LOG_BESIDE_MODULE)
+  target_compile_definitions(d3d9 PRIVATE TMFOXR_LOG_BESIDE_MODULE TMFOXR_VIRTUAL_JOYPAD)
   target_link_libraries(d3d9 PRIVATE dxguid ws2_32)
 else()
   target_link_libraries(d3d9 PRIVATE dxguid d3d11 dxgi)

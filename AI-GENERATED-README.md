@@ -124,19 +124,20 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.4 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
-- Driving controls are built in and need no WinlatorXR mapping (its per-container key mapping is empty by default):
+- The Quest controllers appear in TrackMania as a DirectInput game controller named **Quest Controllers**. Bind it once under Profile → Controls:
 
-  | Controller | Key | TrackMania |
-  |---|---|---|
-  | Left stick left/right | Left/Right arrow | Steer |
-  | Left stick up / left trigger | Up arrow | Accelerate |
-  | Left stick down / left grip | Down arrow | Brake |
-  | A | Enter | Respawn at checkpoint / confirm |
-  | B | Backspace | Restart |
-  | X | 3 | Cockpit camera |
-  | Y | 1 | Chase camera |
+  | Quest controller | Joypad input |
+  |---|---|
+  | Left stick | X / Y axis (analog) |
+  | Right stick | Rx / Ry axis |
+  | Right trigger | Button 1 |
+  | Left trigger | Button 2 |
+  | A / B / X / Y | Buttons 3 / 4 / 5 / 6 |
+  | Right grip / left grip | Buttons 7 / 8 |
+  | Left stick press | Button 9 |
 
-  The right controller stays WinlatorXR's mouse (trigger = click) and left Menu is Esc. Keys are sent with `SendInput`, so the game window needs input focus (it has it in WinlatorXR). All keys are released if tracking stops for 300 ms.
+  For menus, the right stick also sends the arrow keys, A sends Enter and B sends Esc (injected with `SendInput`, so the game window needs input focus, which it has in WinlatorXR). WinlatorXR's pointer emulation is muted in the game (DirectInput mouse and window mouse messages), and no cursor is drawn. `dinput8!DirectInput8Create` is patched directly, because the Competition Patch bypasses the game's import. The pad reads neutral and keys are released if tracking stops for 300 ms.
+- Screen-space shaders that write `oPos` without a camera matrix (such as the menu background) are rewritten with D3DX so the stereo replay can keep them fixed in the room.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
 - For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
 - `TMFOXR_XRAPI_SYNC_WAIT_MS` (default 14, 0 disables) sets how long a frame may wait for a fresh headset pose. `TMFOXR_XRAPI_DIR` overrides `Z:\tmp\xr` for testing.

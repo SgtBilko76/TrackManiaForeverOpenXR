@@ -5,6 +5,9 @@
 #define Direct3DCreate9Ex TMFOXR_SDK_DECLARATION_Direct3DCreate9Ex
 #define D3DPERF_SetOptions TMFOXR_SDK_DECLARATION_D3DPERF_SetOptions
 #include "vr_bridge.h"
+#ifdef TMFOXR_VIRTUAL_JOYPAD
+#include "controller_input.h"
+#endif
 
 #include <Windows.h>
 #include <d3d9.h>
@@ -570,6 +573,11 @@ LRESULT CALLBACK FixedSizeGameWindowProcedure(HWND window, UINT message, WPARAM 
         if (IsSettingsOverlayInputMessage(message)) return 0;
     }
 
+#ifdef TMFOXR_VIRTUAL_JOYPAD
+    // The Quest controllers drive the game; WinlatorXR's emulated pointer
+    // would otherwise click an invisible cursor (DirectInput is muted too).
+    if (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) return 0;
+#endif
     // Resizing only needs to be prevented for the desktop OpenXR mirror. A
     // window-display backend must follow the game into fullscreen.
     const bool enforceSize = !tmoxr::VrBridge::UsesGameWindowAsDisplay();
@@ -5054,6 +5062,9 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
         DisableThreadLibraryCalls(module);
         InstallDirectDrawResolverHook();
         InstallInjectedD3D9ImportHooks(module);
+#ifdef TMFOXR_VIRTUAL_JOYPAD
+        if (IsTrackManiaGameProcess()) tmoxr::InstallVirtualJoypad();
+#endif
     } else if (reason == DLL_PROCESS_DETACH && IsTrackManiaGameProcess()) {
         RemoveCullingFrustumHook();
         RemoveVehicleVisibilityHook();
