@@ -390,6 +390,7 @@ struct VrBridge::Impl {
         headPose.orientation[1] = relativeOrientation.y;
         headPose.orientation[2] = relativeOrientation.z;
         headPose.orientation[3] = relativeOrientation.w;
+        headPose.ipd = frameIpd;
         ++headPose.sample;
         haveHeadPose = true;
     }
@@ -464,7 +465,6 @@ bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
     if (!impl_->initialized || !impl_->frameLatched || impl_->frameSync < 0) return false;
     // Green must stay 0 and alpha non-zero; blue 0 selects the left/SBS target.
     presentation.syncColor = D3DCOLOR_ARGB(255, impl_->frameSync, 0, 0);
-    presentation.ipdMeters = impl_->frameIpd;
     return true;
 }
 

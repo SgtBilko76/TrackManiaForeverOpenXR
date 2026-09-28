@@ -121,7 +121,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 
 - It detects WinlatorXR through `Z:\tmp\xr\system` and requests the API by writing `Z:\tmp\xr\version`. Without WinlatorXR it runs flat, like the OpenXR build does without a runtime.
 - Head tracking arrives over UDP 7872. The mod replies on UDP 7278 with "VR on, side-by-side".
-- Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn as a head-locked panel 1.4 m in front of the player.
+- Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.4 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
