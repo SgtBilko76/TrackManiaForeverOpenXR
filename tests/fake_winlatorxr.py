@@ -5,7 +5,10 @@ Creates <dir>/system, streams XrAPI 0.5 tracking lines to UDP 7872 at 72 Hz
 (head slowly yawing, sync stepping 0..252 by 12), and prints the mode
 packets the game sends back on UDP 7278.
 
-    python3 tests/fake_winlatorxr.py /path/to/xr-dir [seconds]
+    python3 tests/fake_winlatorxr.py /path/to/xr-dir [seconds] [BUTTON@START-END ...]
+
+BUTTON is an index into the XrAPI button string (for example 10 = A) and
+START-END is when to hold it, in seconds (for example 10@20-20.3).
 
 Run the game with TMFOXR_XRAPI_DIR set to the Windows path of the same
 directory (for example Z:\\path\\to\\xr-dir).
@@ -20,14 +23,18 @@ SYNC_STEP = 12
 SYNC_LIMIT = 256
 
 
-def tracking_line(t: float, sync: int) -> str:
+def tracking_line(t: float, sync: int, presses) -> str:
     yaw = math.radians(20.0) * math.sin(t * 0.5)
     head = (0.0, math.sin(yaw / 2), 0.0, math.cos(yaw / 2))
     left = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.2, 1.1, -0.3)
     right = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.2, 1.1, -0.3)
     hmd = head + (0.0, 1.6, 0.0)
     floats = left + right + hmd + (0.064, 104.0, 98.0)
-    fields = ["client0"] + [f"{v:.3f}" for v in floats] + [str(sync), "F" * 19]
+    buttons = ["F"] * 19
+    for index, start, end in presses:
+        if start <= t < end:
+            buttons[index] = "T"
+    fields = ["client0"] + [f"{v:.3f}" for v in floats] + [str(sync), "".join(buttons)]
     fields += ["1.600"] + ["0.000", "0.000", "0.000", "1.000"] * 2
     return " ".join(fields) + " FT"
 
@@ -35,6 +42,11 @@ def tracking_line(t: float, sync: int) -> str:
 def main() -> None:
     directory = sys.argv[1]
     duration = float(sys.argv[2]) if len(sys.argv) > 2 else 120.0
+    presses = []
+    for spec in sys.argv[3:]:
+        index, window = spec.split("@")
+        start, end = window.split("-")
+        presses.append((int(index), float(start), float(end)))
     os.makedirs(directory, exist_ok=True)
     for name in os.listdir(directory):
         os.remove(os.path.join(directory, name))
@@ -52,7 +64,7 @@ def main() -> None:
     version_seen = False
     while time.monotonic() - start < duration:
         t = time.monotonic() - start
-        sender.sendto(tracking_line(t, sync).encode(), ("127.0.0.1", 7872))
+        sender.sendto(tracking_line(t, sync, presses).encode(), ("127.0.0.1", 7872))
         sync += SYNC_STEP
         if sync >= SYNC_LIMIT:
             sync = 0
