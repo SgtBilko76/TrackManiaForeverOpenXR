@@ -1580,6 +1580,7 @@ VrBridge::~VrBridge() { Shutdown(); }
 
 bool VrBridge::UsesGameWindowAsDisplay() { return false; }
 bool VrBridge::GetWindowPresentation(WindowPresentation&) { return false; }
+void VrBridge::SetWindowStereo(bool) {}
 
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {
     if (!impl_) impl_ = new Impl;

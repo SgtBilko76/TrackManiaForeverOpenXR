@@ -1889,6 +1889,36 @@ struct StereoResources {
     bool ready = false;
 } g_stereo;
 
+// Window-display backends (WinlatorXR) show menus flat and races in VR.
+// TrackMania's menu camera is narrow (vertical scale 3.73, about 30 degrees);
+// race cameras are much wider. A wide perspective camera for a few frames
+// switches to VR, its absence for longer switches back to the flat screen.
+constexpr float kMenuCameraMinVerticalScale = 3.0f;
+constexpr uint32_t kFramesToEnterVr = 5;
+constexpr uint32_t kFramesToLeaveVr = 30;
+bool g_windowFlat = tmoxr::VrBridge::UsesGameWindowAsDisplay();
+bool g_wideCameraThisFrame = false;
+uint32_t g_wideCameraFrames = 0;
+uint32_t g_narrowCameraFrames = 0;
+
+bool WindowFlat() { return g_windowFlat; }
+
+void UpdateWindowDisplayMode() {
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    if (g_wideCameraThisFrame) {
+        ++g_wideCameraFrames;
+        g_narrowCameraFrames = 0;
+    } else {
+        ++g_narrowCameraFrames;
+        g_wideCameraFrames = 0;
+    }
+    g_wideCameraThisFrame = false;
+    const bool flat = g_windowFlat ? g_wideCameraFrames < kFramesToEnterVr : g_narrowCameraFrames >= kFramesToLeaveVr;
+    if (flat == g_windowFlat) return;
+    g_windowFlat = flat;
+    tmoxr::VrBridge::Instance().SetWindowStereo(!flat);
+}
+
 using ComputeClippingPlanesFn = void(__thiscall*)(void*, void*, void*);
 
 // Steam TMUF 2.11.26: CHmsViewport::SClippingFrustum::ComputePlaneEqs. The
@@ -1914,6 +1944,7 @@ Matrix4 HorizonCorrectionMatrix();
 
 void UpdateRenderTreeCullingCache() {
     g_stereo.renderTreeCullingValid = false;
+    if (WindowFlat()) return;
     if (!g_cameraSettings.frustumCullingFix.load(std::memory_order_relaxed) ||
         !g_stereo.haveHeadPose || !g_stereo.haveRenderConfiguration) return;
 
@@ -2557,7 +2588,7 @@ bool CreateStereoResources(IDirect3DDevice9* device) {
 }
 
 bool CanReplayStereoDraw(IDirect3DDevice9* device) {
-    return g_stereo.ready && g_stereo.perspective && EnsureStereoEyeColor(device) && EnsureStereoEyeDepth(device);
+    return !WindowFlat() && g_stereo.ready && g_stereo.perspective && EnsureStereoEyeColor(device) && EnsureStereoEyeDepth(device);
 }
 
 bool MirrorEyeToDesktopEnabled() {
@@ -3124,7 +3155,7 @@ bool UsesUiAlphaBlend(IDirect3DDevice9* device) {
 }
 
 bool CanCaptureUiDraw(IDirect3DDevice9* device) {
-    if (!g_stereo.ready || g_stereo.perspective || !g_stereo.uiSurface || !IsPrimaryGameTarget()) return false;
+    if (WindowFlat() || !g_stereo.ready || g_stereo.perspective || !g_stereo.uiSurface || !IsPrimaryGameTarget()) return false;
     // Once a 3D pass has occurred, TrackMania performs an opaque desktop-space
     // full-screen copy. It is scene presentation, not UI. Only conventional
     // alpha-blended overlays are UI candidates after that point.
@@ -3480,7 +3511,7 @@ void CaptureFrameIfRequested(IDirect3DDevice9* device, IDirect3DSurface9* backBu
 // replace the desktop frame with both eyes side by side, add the captured UI,
 // and stamp the frame-sync pixel that pairs this frame with its head pose.
 void ComposeWindowPresentation(IDirect3DDevice9* device) {
-    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay() || WindowFlat()) return;
     tmoxr::WindowPresentation presentation{};
     if (!g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
         !g_stereo.packedEyesActive ||
@@ -4019,6 +4050,7 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
     g_stereo.perspectivePassSeen = false;
     g_stereo.uiDrawsThisFrame = 0;
     g_stereo.uiOverlayClearedThisFrame = false;
+    UpdateWindowDisplayMode();
     return result;
 }
 
@@ -4099,6 +4131,7 @@ HRESULT STDMETHODCALLTYPE SetTransformHook(IDirect3DDevice9* device, D3DTRANSFOR
         g_stereo.perspective = nextPerspective;
         if (g_stereo.perspective) {
             LogPerspectiveProjection(device, *matrix);
+            if (std::abs(matrix->_22) < kMenuCameraMinVerticalScale) g_wideCameraThisFrame = true;
             g_stereo.perspectivePassSeen = true;
             tmoxr::VrBridge::Instance().OnGameProjection(*matrix);
         }
