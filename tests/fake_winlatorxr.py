@@ -7,8 +7,8 @@ packets the game sends back on UDP 7278.
 
     python3 tests/fake_winlatorxr.py /path/to/xr-dir [seconds] [BUTTON@START-END ...]
 
-BUTTON is an index into the XrAPI button string (for example 10 = A), or -1
-to push the left stick right, and START-END is when to hold it, in seconds
+BUTTON is an index into the XrAPI button string (for example 10 = A), -1
+to push the left stick right or -2 to push the right stick up, and START-END is when to hold it, in seconds
 (for example 10@20-20.3).
 
 Run the game with TMFOXR_XRAPI_DIR set to the Windows path of the same
@@ -35,7 +35,12 @@ def tracking_line(t: float, sync: int, presses) -> str:
     for index, start, end in presses:
         if index == -1 and start <= t < end:
             left_stick_x = 0.8
+    right_stick_y = 0.0
+    for index, start, end in presses:
+        if index == -2 and start <= t < end:
+            right_stick_y = 1.0
     left = left[:4] + (left_stick_x, 0.0) + left[6:]
+    right = right[:4] + (0.0, right_stick_y) + right[6:]
     floats = left + right + hmd + (0.064, FOV[0], FOV[1])
     buttons = ["F"] * 19
     for index, start, end in presses:
