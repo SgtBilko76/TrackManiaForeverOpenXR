@@ -277,6 +277,7 @@ struct VrBridge::Impl {
     bool permanentlyDisabled = false;
     DWORD syncWaitMilliseconds = kDefaultSyncWaitMilliseconds;
     float squareFovDegrees = 0.0f;
+    bool windowStereo = false;  // start flat: the game opens in its menus
 
     TrackingSample latest{};
     bool haveLatest = false;
@@ -390,12 +391,14 @@ struct VrBridge::Impl {
         if (socket == INVALID_SOCKET) return;
         // L_HAPTICS R_HAPTICS MODE_VR MODE_3D FOVX FOVY. A FOV of 0 keeps the headset's own.
         // std::to_chars is locale independent; WinlatorXR parses with Java's Float.
+        // MODE_VR 1 + MODE_3D 1: side-by-side VR. MODE_VR 2 + MODE_3D 0: the
+        // window on a flat virtual screen without head tracking.
         std::string message = "0 0 0 0 0 0";
         if (enabled) {
             char fov[32]{};
             const auto end = std::to_chars(fov, fov + sizeof(fov), squareFovDegrees, std::chars_format::fixed, 2).ptr;
             const std::string angle(fov, end);
-            message = "0 0 1 1 " + angle + " " + angle;
+            message = std::string(windowStereo ? "0 0 1 1 " : "0 0 2 0 ") + angle + " " + angle;
         }
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
@@ -569,7 +572,7 @@ struct VrBridge::Impl {
     void BeginFrame() {
         if (!initialized || frameLatched) return;
         Drain();
-        WaitForNewSync();
+        if (windowStereo) WaitForNewSync();
         if (GetTickCount64() - lastModeSend >= kModeResendMilliseconds) SendMode(true);
         // Release held keys when WinlatorXR stops streaming (paused, closed).
         if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) {
@@ -612,10 +615,20 @@ bool VrBridge::UsesGameWindowAsDisplay() { return true; }
 bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
     if (!impl_) return false;
     std::scoped_lock lock(impl_->mutex);
-    if (!impl_->initialized || !impl_->frameLatched || impl_->frameSync < 0) return false;
+    if (!impl_->initialized || !impl_->windowStereo || !impl_->frameLatched || impl_->frameSync < 0) return false;
     // Green must stay 0 and alpha non-zero; blue 0 selects the left/SBS target.
     presentation.syncColor = D3DCOLOR_ARGB(255, impl_->frameSync, 0, 0);
     return true;
+}
+
+void VrBridge::SetWindowStereo(bool stereo) {
+    if (!impl_) return;
+    std::scoped_lock lock(impl_->mutex);
+    if (impl_->windowStereo == stereo) return;
+    impl_->windowStereo = stereo;
+    log::Info(stereo ? "XrAPI: race camera detected; switching WinlatorXR to side-by-side VR."
+                     : "XrAPI: menu; switching WinlatorXR to its flat virtual screen.");
+    if (impl_->initialized) impl_->SendMode(true);
 }
 
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {
