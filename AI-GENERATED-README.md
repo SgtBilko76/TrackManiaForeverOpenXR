@@ -137,7 +137,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
   | Right grip / left grip | Buttons 7 / 8 |
   | Left stick press | Button 9 |
 
-  For menus, the right stick also sends the arrow keys, A sends Enter and B sends Esc (injected with `SendInput`, so the game window needs input focus, which it has in WinlatorXR). WinlatorXR's pointer emulation is muted in the game (DirectInput mouse and window mouse messages), and no cursor is drawn. `dinput8!DirectInput8Create` is patched directly, because the Competition Patch bypasses the game's import. The pad reads neutral and keys are released if tracking stops for 300 ms.
+  In menus (flat screen) the left stick sends the arrow keys instead of steering (the joypad then reports it centred); A sends Enter and B sends Esc (injected with `SendInput`, so the game window needs input focus, which it has in WinlatorXR). WinlatorXR's pointer emulation is muted in the game (DirectInput mouse and window mouse messages), and no cursor is drawn. `dinput8!DirectInput8Create` is patched directly, because the Competition Patch bypasses the game's import. The pad reads neutral and keys are released if tracking stops for 300 ms.
 - Screen-space shaders that write `oPos` without a camera matrix (such as the menu background) are rewritten with D3DX so the stereo replay can keep them fixed in the room.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
 - For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
