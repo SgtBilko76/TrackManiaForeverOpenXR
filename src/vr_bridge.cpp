@@ -1578,6 +1578,9 @@ struct VrBridge::Impl {
 VrBridge& VrBridge::Instance() { static VrBridge bridge; return bridge; }
 VrBridge::~VrBridge() { Shutdown(); }
 
+bool VrBridge::UsesGameWindowAsDisplay() { return false; }
+bool VrBridge::GetWindowPresentation(WindowPresentation&) { return false; }
+
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {
     if (!impl_) impl_ = new Impl;
     std::scoped_lock lock(impl_->mutex);

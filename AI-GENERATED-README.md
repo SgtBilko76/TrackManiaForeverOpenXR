@@ -113,6 +113,40 @@ whose managed game executable already has this capability.
 
 The loader package being version 1.1.62 does not require the application or active runtime to use OpenXR API 1.1. The mod deliberately requests OpenXR 1.0 for compatibility with runtimes that expose 1.0; newer loaders can negotiate that version normally.
 
+## Standalone Quest/Pico (WinlatorXR)
+
+A second build variant runs TrackMania standalone on the headset inside
+[WinlatorXR](https://github.com/lvonasek/WinlatorXR). Instead of OpenXR, it uses
+WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
+
+- It detects WinlatorXR through `Z:\tmp\xr\system` and requests the API by writing `Z:\tmp\xr\version`. Without WinlatorXR it runs flat, like the OpenXR build does without a runtime.
+- Head tracking arrives over UDP 7872. The mod replies on UDP 7278 with "VR on, side-by-side".
+- Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn as a head-locked panel 1.4 m in front of the player.
+- The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
+- Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
+- Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
+- For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
+- `TMFOXR_XRAPI_SYNC_WAIT_MS` (default 14, 0 disables) sets how long a frame may wait for a fresh headset pose. `TMFOXR_XRAPI_DIR` overrides `Z:\tmp\xr` for testing.
+
+Build it on Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
+
+```sh
+export LLVM_MINGW_ROOT=~/.local/opt/llvm-mingw-<version>-ucrt-ubuntu-22.04-x86_64
+cmake -S . -B build-quest -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/llvm-mingw-i686.cmake \
+  -DTMFOXR_VR_BACKEND=XrAPI -DCMAKE_BUILD_TYPE=Release
+cmake --build build-quest --target d3d9
+```
+
+MSVC also works with `-DTMFOXR_VR_BACKEND=XrAPI`.
+
+To install:
+
+1. Copy the game folder to the headset with the prepackaged TrackMania ModLoader (`TmForeverModLoader.zip` from [TMLoader](https://tomashu.dev/software/tmloader/)) unpacked on top.
+2. Run `scripts/deploy-quest.sh [/sdcard/Download/TmForever]`. It builds the DLL, pushes `TMFOXR.dll` and `TMFOXR.defaults.ini`, and adds `TMFOXR=TMFOXR.dll` to `ModLoader.ini`.
+3. In WinlatorXR, use DXVK for DirectX and launch `TmForever.exe`. The WinlatorXR screen resolution sets the per-eye resolution (half the width by the full height).
+
+`tests/fake_winlatorxr.py` imitates the WinlatorXR side, so the XrAPI build can be tested under desktop Wine.
+
 ## In-headset settings
 
 When VR starts, a brief message shows the key that opens the TrackMania Forever OpenXR settings panel. The default is **F10**. The panel appears on the same virtual screen as TrackMania's menus and is also drawn over the desktop mirror. Use the mouse to change settings; the panel consumes normal mouse and keyboard window input while it is open so clicks do not reach the UI behind it. Press the configured toggle key again, press **Escape**, or click the window's close button to return to the game.
