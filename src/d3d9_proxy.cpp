@@ -4864,6 +4864,19 @@ void DisableVrForIncompatibleGraphics(HWND owner, bool fullscreen, D3DMULTISAMPL
 }
 
 class D3D9Proxy final : public IDirect3D9 {
+    bool OffersDesktopModeOnly(UINT adapter, D3DFORMAT format, D3DDISPLAYMODE& desktop) {
+        if (!vrEnabled_ || !tmoxr::VrBridge::UsesGameWindowAsDisplay()) return false;
+        if (FAILED(real_->GetAdapterDisplayMode(adapter, &desktop)) || !desktop.Width || !desktop.Height) return false;
+        if (real_->GetAdapterModeCount(adapter, format) == 0) return false;
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            tmoxr::log::Info("Offering only the WinlatorXR screen mode to TrackMania: " +
+                std::to_string(desktop.Width) + "x" + std::to_string(desktop.Height) + ".");
+        }
+        return true;
+    }
+
 public:
     explicit D3D9Proxy(IDirect3D9* real, IDirect3D9* nativeFallback = nullptr,
                        bool vrEnabled = true)
@@ -4882,8 +4895,24 @@ public:
     HRESULT STDMETHODCALLTYPE RegisterSoftwareDevice(void* init) override { return real_->RegisterSoftwareDevice(init); }
     UINT STDMETHODCALLTYPE GetAdapterCount() override { return real_->GetAdapterCount(); }
     HRESULT STDMETHODCALLTYPE GetAdapterIdentifier(UINT a, DWORD f, D3DADAPTER_IDENTIFIER9* i) override { return real_->GetAdapterIdentifier(a, f, i); }
-    UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT a, D3DFORMAT f) override { return real_->GetAdapterModeCount(a, f); }
-    HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT a, D3DFORMAT f, UINT m, D3DDISPLAYMODE* d) override { return real_->EnumAdapterModes(a, f, m, d); }
+    // Window-display backends (WinlatorXR) offer only the desktop mode, which
+    // is the screen size chosen in WinlatorXR. TrackMania then renders at that
+    // size without its settings menu, which is hard to reach in the headset.
+    UINT STDMETHODCALLTYPE GetAdapterModeCount(UINT a, D3DFORMAT f) override {
+        D3DDISPLAYMODE desktop{};
+        if (OffersDesktopModeOnly(a, f, desktop)) return 1;
+        return real_->GetAdapterModeCount(a, f);
+    }
+    HRESULT STDMETHODCALLTYPE EnumAdapterModes(UINT a, D3DFORMAT f, UINT m, D3DDISPLAYMODE* d) override {
+        D3DDISPLAYMODE desktop{};
+        if (OffersDesktopModeOnly(a, f, desktop)) {
+            if (m != 0 || !d) return D3DERR_INVALIDCALL;
+            *d = desktop;
+            d->Format = f;
+            return D3D_OK;
+        }
+        return real_->EnumAdapterModes(a, f, m, d);
+    }
     HRESULT STDMETHODCALLTYPE GetAdapterDisplayMode(UINT a, D3DDISPLAYMODE* d) override { return real_->GetAdapterDisplayMode(a, d); }
     HRESULT STDMETHODCALLTYPE CheckDeviceType(UINT a, D3DDEVTYPE t, D3DFORMAT x, D3DFORMAT b, BOOL w) override { return real_->CheckDeviceType(a,t,x,b,w); }
     HRESULT STDMETHODCALLTYPE CheckDeviceFormat(UINT a,D3DDEVTYPE t,D3DFORMAT af,DWORD u,D3DRESOURCETYPE r,D3DFORMAT c) override { return real_->CheckDeviceFormat(a,t,af,u,r,c); }
