@@ -24,9 +24,22 @@ struct RenderConfiguration {
     uint64_t sample = 0;
 };
 
+// Backends such as WinlatorXR's XrAPI display the game window itself as a
+// side-by-side stereo frame instead of receiving eye textures.
+struct WindowPresentation {
+    // Written to the frame's top-left pixel so the host can pair the frame
+    // with the head pose it was rendered from.
+    D3DCOLOR syncColor = 0;
+    float ipdMeters = 0.064f;
+};
+
 class VrBridge {
 public:
     static VrBridge& Instance();
+    // True when the backend shows the game's own window in the headset, so the
+    // window may be fullscreen or larger than the desktop work area.
+    static bool UsesGameWindowAsDisplay();
+    bool GetWindowPresentation(WindowPresentation& presentation);
     void OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters);
     bool TryInitialize();
     void OnBeginScene();

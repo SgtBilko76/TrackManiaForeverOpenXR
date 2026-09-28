@@ -37,7 +37,7 @@
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wParam, LPARAM lParam);
 
-__declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion);
+extern "C" __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion);
 extern "C" __declspec(dllexport) void WINAPI D3DPERF_SetOptions(DWORD options);
 extern "C" __declspec(dllexport) void CALLBACK TMFOXR_PatchAfterExit(
     HWND, HINSTANCE, LPSTR, int);
@@ -569,15 +569,18 @@ LRESULT CALLBACK FixedSizeGameWindowProcedure(HWND window, UINT message, WPARAM 
         if (IsSettingsOverlayInputMessage(message)) return 0;
     }
 
-    if (message == WM_SYSCOMMAND) {
+    // Resizing only needs to be prevented for the desktop OpenXR mirror. A
+    // window-display backend must follow the game into fullscreen.
+    const bool enforceSize = !tmoxr::VrBridge::UsesGameWindowAsDisplay();
+    if (enforceSize && message == WM_SYSCOMMAND) {
         const WPARAM command = wParam & 0xfff0;
         if (command == SC_SIZE || command == SC_MAXIMIZE) return 0;
     }
-    if (message == WM_NCHITTEST) {
+    if (enforceSize && message == WM_NCHITTEST) {
         const LRESULT hitTest = CallWindowProcW(original, window, message, wParam, lParam);
         return IsResizeHitTest(hitTest) ? HTBORDER : hitTest;
     }
-    if (message == WM_WINDOWPOSCHANGING && window == g_lockedGameWindow) {
+    if (enforceSize && message == WM_WINDOWPOSCHANGING && window == g_lockedGameWindow) {
         const LRESULT result = CallWindowProcW(original, window, message, wParam, lParam);
         auto* position = reinterpret_cast<WINDOWPOS*>(lParam);
         if (position && (position->flags & SWP_NOSIZE) == 0) {
@@ -613,7 +616,9 @@ void LockGameWindowSize(HWND window) {
     g_originalGameWindowProcedure = reinterpret_cast<WNDPROC>(previous);
     g_lockedWindowWidth = bounds.right - bounds.left;
     g_lockedWindowHeight = bounds.bottom - bounds.top;
-    tmoxr::log::Info("Locked the TrackMania window size while VR is active; moving and minimizing remain available.");
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
+        tmoxr::log::Info("Locked the TrackMania window size while VR is active; moving and minimizing remain available.");
+    }
 }
 
 void UnlockGameWindowSize() {
@@ -662,6 +667,14 @@ WindowFitResult EvaluateWindowFit(HWND window, const D3DPRESENT_PARAMETERS& para
     result.tooLarge = result.requiredWidth > result.availableWidth ||
                       result.requiredHeight > result.availableHeight;
     return result;
+}
+
+// Desktop OpenXR mirrors eyes out of a windowed device that must fit the work
+// area. Backends that display the game window itself accept any window size.
+bool GraphicsSettingsBlockVr(const D3DPRESENT_PARAMETERS& parameters, const WindowFitResult& windowFit) {
+    if (parameters.MultiSampleType != D3DMULTISAMPLE_NONE) return true;
+    if (tmoxr::VrBridge::UsesGameWindowAsDisplay()) return false;
+    return parameters.Windowed == FALSE || windowFit.tooLarge;
 }
 
 enum class VehicleProfile : uint32_t {
@@ -3249,6 +3262,158 @@ void CaptureMouseCursor(IDirect3DDevice9* device, HWND window) {
     if (beginTemporaryScene) g_originalEndScene(device);
 }
 
+struct PanelVertex {
+    float x;
+    float y;
+    float z;
+    float rhw;
+    float u;
+    float v;
+};
+
+// Head-locked panel for menus and HUD when the backend displays the window.
+constexpr float kWindowUiDistanceMeters = 1.4f;
+constexpr float kWindowUiWidthMeters = 1.8f;
+
+void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer,
+                              const D3DSURFACE_DESC& target, float ipdMeters) {
+    const float halfWidthTangent = kWindowUiWidthMeters * 0.5f / kWindowUiDistanceMeters;
+    const float halfHeightTangent = halfWidthTangent *
+        static_cast<float>(g_stereo.primaryHeight) / static_cast<float>(g_stereo.primaryWidth);
+    // Each eye sees a panel at distance d shifted by half the IPD.
+    const float disparityTangent = ipdMeters * 0.5f / kWindowUiDistanceMeters;
+    const float eyeWidth = static_cast<float>(target.Width / 2);
+    const float eyeHeight = static_cast<float>(target.Height);
+
+    std::array<PanelVertex, 12> vertices{};
+    for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
+        const auto& eye = g_stereo.renderConfiguration.eyes[eyeIndex];
+        const float tangentLeft = std::tan(eye.angleLeft);
+        const float tangentRight = std::tan(eye.angleRight);
+        const float tangentDown = std::tan(eye.angleDown);
+        const float tangentUp = std::tan(eye.angleUp);
+        const float centerTangent = eyeIndex == 0 ? disparityTangent : -disparityTangent;
+        const auto pixelX = [&](float tangent) {
+            return eyeWidth * static_cast<float>(eyeIndex) +
+                eyeWidth * (tangent - tangentLeft) / (tangentRight - tangentLeft) - 0.5f;
+        };
+        const auto pixelY = [&](float tangent) {
+            return eyeHeight * (tangentUp - tangent) / (tangentUp - tangentDown) - 0.5f;
+        };
+        const float left = pixelX(centerTangent - halfWidthTangent);
+        const float right = pixelX(centerTangent + halfWidthTangent);
+        const float top = pixelY(halfHeightTangent);
+        const float bottom = pixelY(-halfHeightTangent);
+        const PanelVertex topLeft{left, top, 0.0f, 1.0f, 0.0f, 0.0f};
+        const PanelVertex topRight{right, top, 0.0f, 1.0f, 1.0f, 0.0f};
+        const PanelVertex bottomLeft{left, bottom, 0.0f, 1.0f, 0.0f, 1.0f};
+        const PanelVertex bottomRight{right, bottom, 0.0f, 1.0f, 1.0f, 1.0f};
+        const size_t base = eyeIndex * 6;
+        vertices[base + 0] = topLeft;
+        vertices[base + 1] = topRight;
+        vertices[base + 2] = bottomLeft;
+        vertices[base + 3] = bottomLeft;
+        vertices[base + 4] = topRight;
+        vertices[base + 5] = bottomRight;
+    }
+
+    g_originalSetDepthStencilSurface(device, nullptr);
+    if (FAILED(g_originalSetRenderTarget(device, 0, backBuffer))) return;
+    const D3DVIEWPORT9 viewport{0, 0, target.Width, target.Height, 0.0f, 1.0f};
+    g_originalSetViewport(device, &viewport);
+    g_originalSetVertexShader(device, nullptr);
+    device->SetPixelShader(nullptr);
+    device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+    device->SetTexture(0, g_stereo.uiTexture);
+    device->SetRenderState(D3DRS_ZENABLE, FALSE);
+    device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+    device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+    device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+    device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+    device->SetRenderState(D3DRS_LIGHTING, FALSE);
+    device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+    // The captured UI texture holds premultiplied color.
+    device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+    device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+    device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+    device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+    device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+    device->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED |
+        D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+    device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+    device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+    device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+    device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+    device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+    device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+    device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+    device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+    device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+    g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 4, vertices.data(), sizeof(PanelVertex));
+}
+
+// For backends that show the game window in the headset (WinlatorXR XrAPI):
+// replace the desktop frame with both eyes side by side, add the captured UI,
+// and stamp the frame-sync pixel that pairs this frame with its head pose.
+void ComposeWindowPresentation(IDirect3DDevice9* device) {
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    tmoxr::WindowPresentation presentation{};
+    if (!g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
+        !g_stereo.packedEyesActive ||
+        !tmoxr::VrBridge::Instance().GetWindowPresentation(presentation)) return;
+
+    IDirect3DSurface9* backBuffer = nullptr;
+    D3DSURFACE_DESC target{};
+    if (FAILED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer))) return;
+    if (FAILED(backBuffer->GetDesc(&target)) || target.Width < 2) {
+        backBuffer->Release();
+        return;
+    }
+    const RECT source{0, 0, static_cast<LONG>(g_stereo.renderWidth * 2u),
+                      static_cast<LONG>(g_stereo.renderHeight)};
+    const RECT destination{0, 0, static_cast<LONG>(target.Width / 2 * 2), static_cast<LONG>(target.Height)};
+    const bool sameSize = source.right == destination.right && source.bottom == destination.bottom;
+    const HRESULT copy = device->StretchRect(g_stereo.trackedLeftColor, &source, backBuffer, &destination,
+                                             sameSize ? D3DTEXF_NONE : D3DTEXF_LINEAR);
+    if (FAILED(copy)) {
+        static bool copyFailureLogged = false;
+        if (!copyFailureLogged) {
+            copyFailureLogged = true;
+            tmoxr::log::Warn("Could not copy the packed eye target into the side-by-side window. HRESULT=" +
+                std::to_string(static_cast<long>(copy)));
+        }
+        backBuffer->Release();
+        return;
+    }
+
+    if (g_stereo.uiDrawsThisFrame && g_stereo.uiTexture && g_stereo.primaryWidth && g_stereo.primaryHeight) {
+        IDirect3DStateBlock9* state = nullptr;
+        if (SUCCEEDED(device->CreateStateBlock(D3DSBT_ALL, &state))) {
+            const bool beginTemporaryScene = !g_stereo.sceneActive;
+            if (!beginTemporaryScene || SUCCEEDED(g_originalBeginScene(device))) {
+                g_renderingSettingsOverlay = true;
+                DrawWindowPresentationUi(device, backBuffer, target, presentation.ipdMeters);
+                g_renderingSettingsOverlay = false;
+                if (beginTemporaryScene) g_originalEndScene(device);
+            }
+            state->Apply();
+            state->Release();
+            g_originalSetDepthStencilSurface(device, nullptr);
+            g_originalSetRenderTarget(device, 0, g_stereo.activeColor);
+            g_originalSetDepthStencilSurface(device, g_stereo.activeDepth);
+            if (g_stereo.haveGameViewport) g_originalSetViewport(device, &g_stereo.gameViewport);
+        }
+    }
+
+    const RECT syncPixel{0, 0, 2, 2};
+    device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+    backBuffer->Release();
+}
+
 void RenderSettingsOverlay(IDirect3DDevice9* device, HWND window) {
     if (!device || !window || !g_stereo.ready ||
         !g_stereo.uiSurface || !g_stereo.primaryWidth || !g_stereo.primaryHeight) return;
@@ -3450,6 +3615,7 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
         g_stereo.packedEyesActive ? g_stereo.renderWidth : 0);
     tmoxr::VrBridge::Instance().SetUiSurface(g_stereo.uiDrawsThisFrame ? g_stereo.uiSurface : nullptr,
         g_stereo.uiDrawsThisFrame ? g_stereo.uiSharedHandle : nullptr);
+    ComposeWindowPresentation(device);
     tmoxr::VrBridge::Instance().OnBeforePresent(device);
     ++g_stereo.presentedFrames;
     g_stereo.replayedDrawsMax = std::max(
@@ -3622,8 +3788,7 @@ HRESULT STDMETHODCALLTYPE ResetHook(IDirect3DDevice9* device, D3DPRESENT_PARAMET
         ? parameters->hDeviceWindow : g_lockedGameWindow;
     const WindowFitResult windowFit = parameters
         ? EvaluateWindowFit(resetWindow, *parameters) : WindowFitResult{};
-    if (parameters && (parameters->Windowed == FALSE ||
-                       parameters->MultiSampleType != D3DMULTISAMPLE_NONE || windowFit.tooLarge)) {
+    if (parameters && GraphicsSettingsBlockVr(*parameters, windowFit)) {
         const ResetFn originalReset = g_originalReset;
         DisableVrForIncompatibleGraphics(
             resetWindow, parameters->Windowed == FALSE,
@@ -4431,10 +4596,9 @@ public:
         }
         const D3DPRESENT_PARAMETERS originalParameters = *parameters;
         const bool fullscreen = parameters->Windowed == FALSE;
-        const bool antialiasing = parameters->MultiSampleType != D3DMULTISAMPLE_NONE;
         const HWND deviceWindow = parameters->hDeviceWindow ? parameters->hDeviceWindow : window;
         const WindowFitResult windowFit = EvaluateWindowFit(deviceWindow, *parameters);
-        if (fullscreen || antialiasing || windowFit.tooLarge) {
+        if (GraphicsSettingsBlockVr(*parameters, windowFit)) {
             DisableVrForIncompatibleGraphics(
                 deviceWindow, fullscreen, parameters->MultiSampleType,
                 parameters->MultiSampleQuality, windowFit);
@@ -4529,7 +4693,7 @@ private:
 };
 } // namespace
 
-__declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion) {
+extern "C" __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion) {
     if (!IsTrackManiaGameProcess()) {
         LoadRealD3D9(false);
         IDirect3D9* real = g_create9 ? g_create9(sdkVersion) : nullptr;
@@ -4582,7 +4746,7 @@ __declspec(dllexport) IDirect3D9* WINAPI Direct3DCreate9(UINT sdkVersion) {
     return new D3D9Proxy(real, nativeFallback);
 }
 
-__declspec(dllexport) HRESULT WINAPI Direct3DCreate9Ex(UINT sdkVersion, IDirect3D9Ex** out) {
+extern "C" __declspec(dllexport) HRESULT WINAPI Direct3DCreate9Ex(UINT sdkVersion, IDirect3D9Ex** out) {
     if (!IsTrackManiaGameProcess()) {
         LoadRealD3D9(false);
         return g_create9Ex ? g_create9Ex(sdkVersion, out) : D3DERR_NOTAVAILABLE;
