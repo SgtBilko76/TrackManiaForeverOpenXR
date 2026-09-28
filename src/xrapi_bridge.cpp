@@ -395,10 +395,13 @@ struct VrBridge::Impl {
         // window on a flat virtual screen without head tracking.
         std::string message = "0 0 0 0 0 0";
         if (enabled) {
-            char fov[32]{};
-            const auto end = std::to_chars(fov, fov + sizeof(fov), squareFovDegrees, std::chars_format::fixed, 2).ptr;
-            const std::string angle(fov, end);
-            message = std::string(windowStereo ? "0 0 1 1 " : "0 0 2 0 ") + angle + " " + angle;
+            const auto format = [](float degrees) {
+                char text[32]{};
+                const auto end = std::to_chars(text, text + sizeof(text), degrees, std::chars_format::fixed, 2).ptr;
+                return std::string(text, end);
+            };
+            message = std::string(windowStereo ? "0 0 1 1 " : "0 0 2 0 ") + format(HorizontalFovDegrees()) + " " +
+                format(squareFovDegrees);
         }
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
@@ -546,12 +549,26 @@ struct VrBridge::Impl {
         SendMode(true);
     }
 
+    // WinlatorXR shows each eye image with square pixels, so a non-square eye
+    // image (960x1080 from a 1920x1080 screen) appeared squeezed. The vertical
+    // angle is the chosen FOV; the horizontal one follows the eye image's
+    // aspect ratio. A 2:1 screen gives square eyes and equal angles.
+    float HorizontalFovDegrees() const {
+        if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return squareFovDegrees;
+        const float halfVertical = squareFovDegrees * kPi / 360.0f;
+        const float halfHorizontal = std::atan(std::tan(halfVertical) * eyeWidth / eyeHeight);
+        return halfHorizontal * 360.0f / kPi;
+    }
+
     void UpdateRenderConfiguration(const TrackingSample& sample) {
+        const UINT previousEyeWidth = eyeWidth;
+        const UINT previousEyeHeight = eyeHeight;
         UpdateEyeSize();
         ChooseSquareFov(sample);
         if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return;
-        const float halfX = squareFovDegrees * kPi / 360.0f;
-        const float halfY = halfX;
+        if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) SendMode(true);
+        const float halfX = HorizontalFovDegrees() * kPi / 360.0f;
+        const float halfY = squareFovDegrees * kPi / 360.0f;
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
             eyes[0].angleRight == halfX && eyes[0].angleUp == halfY) return;
@@ -566,7 +583,9 @@ struct VrBridge::Impl {
         ++renderConfiguration.sample;
         haveRenderConfiguration = true;
         log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
-            " per eye with a " + std::to_string(squareFovDegrees) + " degree FOV, IPD " + std::to_string(sample.ipd) + " m.");
+            " per eye with a " + std::to_string(HorizontalFovDegrees()) + "x" + std::to_string(squareFovDegrees) +
+            " degree FOV (square pixels), IPD " + std::to_string(sample.ipd) + " m." +
+            (eyeWidth == eyeHeight ? "" : " A 2:1 WinlatorXR screen size gives square eyes and the full horizontal FOV."));
     }
 
     void BeginFrame() {
