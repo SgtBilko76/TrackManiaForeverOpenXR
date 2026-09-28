@@ -13,6 +13,7 @@
 
 #include "controller_input.h"
 #include "log.h"
+#include "runtime_paths.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -23,6 +24,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -180,10 +182,11 @@ public:
     void Update(const ControllerState& state, bool menu) {
         const float x = menu ? state.leftStick[0] : 0.0f;
         const float y = menu ? state.leftStick[1] : 0.0f;
-        Set(Key::Left, StickPressed(Key::Left, -x));
-        Set(Key::Right, StickPressed(Key::Right, x));
-        Set(Key::Up, StickPressed(Key::Up, y));
-        Set(Key::Down, StickPressed(Key::Down, -y));
+        const ULONGLONG now = GetTickCount64();
+        Tap(Key::Left, -x, now);
+        Tap(Key::Right, x, now);
+        Tap(Key::Up, y, now);
+        Tap(Key::Down, -y, now);
         Set(Key::Enter, state.Pressed(kButtonA));
         Set(Key::Escape, state.Pressed(kButtonB));
     }
@@ -203,8 +206,30 @@ private:
     static constexpr float kStickPress = 0.5f;
     static constexpr float kStickRelease = 0.35f;
 
-    bool StickPressed(Key key, float deflection) const {
-        return deflection >= (pressed_[static_cast<size_t>(key)] ? kStickRelease : kStickPress);
+    // A stick direction sends single key taps: one on deflection, then
+    // repeats after 500 ms every 250 ms. Holding the key down made the game's
+    // key repeat race through menu entries.
+    static constexpr ULONGLONG kTapLength = 40;
+    static constexpr ULONGLONG kFirstRepeat = 500;
+    static constexpr ULONGLONG kRepeatInterval = 250;
+
+    void Tap(Key key, float deflection, ULONGLONG now) {
+        const size_t index = static_cast<size_t>(key);
+        const bool active = deflection >= (stickActive_[index] ? kStickRelease : kStickPress);
+        if (pressed_[index] && now - tapStart_[index] >= kTapLength) Set(key, false);
+        if (!active) {
+            stickActive_[index] = false;
+            return;
+        }
+        const bool first = !stickActive_[index];
+        const ULONGLONG waited = now - lastTap_[index];
+        if (first || (now - activeSince_[index] >= kFirstRepeat && waited >= kRepeatInterval)) {
+            if (first) activeSince_[index] = now;
+            stickActive_[index] = true;
+            lastTap_[index] = now;
+            tapStart_[index] = now;
+            Set(key, true);
+        }
     }
 
     void Set(Key key, bool down) {
@@ -233,6 +258,10 @@ private:
     }
 
     std::array<bool, kKeyCount> pressed_{};
+    std::array<bool, kKeyCount> stickActive_{};
+    std::array<ULONGLONG, kKeyCount> activeSince_{};
+    std::array<ULONGLONG, kKeyCount> lastTap_{};
+    std::array<ULONGLONG, kKeyCount> tapStart_{};
     bool loggedFirstKey_ = false;
 };
 // WinlatorXR reads the sync pixel from the first X window it draws, so the
@@ -277,6 +306,12 @@ struct VrBridge::Impl {
     bool permanentlyDisabled = false;
     DWORD syncWaitMilliseconds = kDefaultSyncWaitMilliseconds;
     float squareFovDegrees = 0.0f;
+    // Vertical image scale tuned in the headset (both grips + right stick),
+    // saved in TMFOXR-xrapi.txt beside the DLL. Above 1 the image gets taller.
+    float verticalScale = 1.0f;
+    bool verticalScaleLoaded = false;
+    bool verticalScaleAdjusting = false;
+    ULONGLONG lastScaleTick = 0;
     bool windowStereo = false;  // start flat: the game opens in its menus
 
     TrackingSample latest{};
@@ -569,7 +604,41 @@ struct VrBridge::Impl {
         return halfHorizontal * 360.0f / kPi;
     }
 
+    static std::filesystem::path VerticalScalePath() { return ModuleFilePath(L"TMFOXR-xrapi.txt"); }
+
+    void LoadVerticalScale() {
+        if (verticalScaleLoaded) return;
+        verticalScaleLoaded = true;
+        std::ifstream file(VerticalScalePath());
+        float value = 0.0f;
+        if (file >> value && value >= 0.5f && value <= 2.0f) verticalScale = value;
+        log::Info("XrAPI: vertical image scale " + std::to_string(verticalScale) +
+            " (hold both grips and move the right stick up/down to adjust).");
+    }
+
+    // Both grips held: the right stick scales the image vertically, live.
+    void AdjustVerticalScale(const ControllerState& state) {
+        const bool held = state.Pressed(kLeftGrip) && state.Pressed(kRightGrip);
+        const float stick = state.rightStick[1];
+        const ULONGLONG now = GetTickCount64();
+        const float seconds = lastScaleTick ? std::min(0.1f, (now - lastScaleTick) / 1000.0f) : 0.0f;
+        lastScaleTick = now;
+        if (held && std::abs(stick) > 0.3f) {
+            // About 10% per second at full deflection, independent of frame rate.
+            // Content appears taller when the rendered vertical angle shrinks.
+            verticalScale = std::clamp(verticalScale * std::pow(1.10f, stick * seconds), 0.5f, 2.0f);
+            verticalScaleAdjusting = true;
+            return;
+        }
+        if (!held && verticalScaleAdjusting) {
+            verticalScaleAdjusting = false;
+            std::ofstream(VerticalScalePath()) << verticalScale << "\n";
+            log::Info("XrAPI: vertical image scale set to " + std::to_string(verticalScale) + " and saved.");
+        }
+    }
+
     void UpdateRenderConfiguration(const TrackingSample& sample) {
+        LoadVerticalScale();
         const UINT previousEyeWidth = eyeWidth;
         const UINT previousEyeHeight = eyeHeight;
         UpdateEyeSize();
@@ -577,10 +646,11 @@ struct VrBridge::Impl {
         if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return;
         if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) SendMode(true);
         const float halfX = HorizontalFovDegrees() * kPi / 360.0f;
-        const float halfY = squareFovDegrees * kPi / 360.0f;
+        const float halfY = std::atan(std::tan(squareFovDegrees * kPi / 360.0f) / verticalScale);
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
             eyes[0].angleRight == halfX && eyes[0].angleUp == halfY) return;
+        const bool onlyScaleChanged = haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight;
         for (auto& eye : eyes) {
             eye.width = eyeWidth;
             eye.height = eyeHeight;
@@ -591,6 +661,7 @@ struct VrBridge::Impl {
         }
         ++renderConfiguration.sample;
         haveRenderConfiguration = true;
+        if (onlyScaleChanged) return;
         log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
             " per eye with a " + std::to_string(HorizontalFovDegrees()) + "x" + std::to_string(squareFovDegrees) +
             " degree FOV (square pixels), IPD " + std::to_string(sample.ipd) + " m." +
@@ -613,6 +684,7 @@ struct VrBridge::Impl {
         frameLatched = true;
         frameSync = latest.sync;
         if (latest.ipd > 0.04f && latest.ipd < 0.09f) frameIpd = latest.ipd;
+        AdjustVerticalScale(latest.controller);
         UpdateHeadPose(latest);
         UpdateRenderConfiguration(latest);
     }
