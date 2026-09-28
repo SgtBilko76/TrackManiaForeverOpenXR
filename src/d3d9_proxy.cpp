@@ -678,6 +678,25 @@ WindowFitResult EvaluateWindowFit(HWND window, const D3DPRESENT_PARAMETERS& para
     return result;
 }
 
+// WinlatorXR only accepts the frame-sync pixel when its alpha is non-zero.
+// An X8R8G8B8 backbuffer leaves alpha undefined (DXVK may present 0), so the
+// window-display build asks for a real alpha channel.
+void RequestAlphaBackBuffer(D3DPRESENT_PARAMETERS& parameters) {
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    static D3DFORMAT loggedFormat = static_cast<D3DFORMAT>(-1);
+    if (parameters.BackBufferFormat != loggedFormat) {
+        loggedFormat = parameters.BackBufferFormat;
+        tmoxr::log::Info("TrackMania requested backbuffer format " + std::to_string(static_cast<int>(loggedFormat)) + ".");
+    }
+    if (parameters.BackBufferFormat != D3DFMT_X8R8G8B8 && parameters.BackBufferFormat != D3DFMT_UNKNOWN) return;
+    parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        tmoxr::log::Info("Using an A8R8G8B8 backbuffer so the frame-sync pixel carries alpha.");
+    }
+}
+
 // Desktop OpenXR mirrors eyes out of a windowed device that must fit the work
 // area. Backends that display the game window itself accept any window size.
 bool GraphicsSettingsBlockVr(const D3DPRESENT_PARAMETERS& parameters, const WindowFitResult& windowFit) {
@@ -1897,7 +1916,8 @@ constexpr float kMenuCameraMinVerticalScale = 3.0f;
 constexpr uint32_t kFramesToEnterVr = 5;
 constexpr uint32_t kFramesToLeaveVr = 30;
 bool g_windowFlat = tmoxr::VrBridge::UsesGameWindowAsDisplay();
-bool g_wideCameraThisFrame = false;
+float g_lastPerspectiveVerticalScale = 0.0f;
+bool g_perspectiveDrawThisFrame = false;
 uint32_t g_wideCameraFrames = 0;
 uint32_t g_narrowCameraFrames = 0;
 
@@ -1905,14 +1925,18 @@ bool WindowFlat() { return g_windowFlat; }
 
 void UpdateWindowDisplayMode() {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
-    if (g_wideCameraThisFrame) {
+    // TrackMania does not re-send its camera every frame, so the last
+    // perspective projection counts for every frame that draws in 3D.
+    const bool wideCamera = g_perspectiveDrawThisFrame &&
+        std::abs(g_lastPerspectiveVerticalScale) < kMenuCameraMinVerticalScale;
+    g_perspectiveDrawThisFrame = false;
+    if (wideCamera) {
         ++g_wideCameraFrames;
         g_narrowCameraFrames = 0;
     } else {
         ++g_narrowCameraFrames;
         g_wideCameraFrames = 0;
     }
-    g_wideCameraThisFrame = false;
     const bool flat = g_windowFlat ? g_wideCameraFrames < kFramesToEnterVr : g_narrowCameraFrames >= kFramesToLeaveVr;
     if (flat == g_windowFlat) return;
     g_windowFlat = flat;
@@ -3528,6 +3552,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
     if (WindowFlat() || !g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
         !g_stereo.packedEyesActive) {
         device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+        CaptureFrameIfRequested(device, backBuffer, target);
         backBuffer->Release();
         return;
     }
@@ -4112,6 +4137,7 @@ HRESULT STDMETHODCALLTYPE ResetHook(IDirect3DDevice9* device, D3DPRESENT_PARAMET
         return originalReset(device, parameters);
     }
     tmoxr::log::Info("IDirect3DDevice9::Reset intercepted; releasing OpenXR swapchains before reset.");
+    if (parameters) RequestAlphaBackBuffer(*parameters);
     tmoxr::VrBridge::Instance().OnBeforeReset();
     if (g_settingsOverlayInitialized) ImGui_ImplDX9_InvalidateDeviceObjects();
     ReleaseStereoResources();
@@ -4138,7 +4164,7 @@ HRESULT STDMETHODCALLTYPE SetTransformHook(IDirect3DDevice9* device, D3DTRANSFOR
         g_stereo.perspective = nextPerspective;
         if (g_stereo.perspective) {
             LogPerspectiveProjection(device, *matrix);
-            if (std::abs(matrix->_22) < kMenuCameraMinVerticalScale) g_wideCameraThisFrame = true;
+            g_lastPerspectiveVerticalScale = matrix->_22;
             g_stereo.perspectivePassSeen = true;
             tmoxr::VrBridge::Instance().OnGameProjection(*matrix);
         }
@@ -4256,6 +4282,7 @@ HRESULT STDMETHODCALLTYPE DrawPrimitiveHook(IDirect3DDevice9* device, D3DPRIMITI
         tmoxr::VrBridge::Instance().OnDraw(false);
     }
     if (g_stereo.perspective) {
+        g_perspectiveDrawThisFrame = true;
         ++g_stereo.perspectiveDrawCandidates;
         if (g_stereo.customVertexShaderBound) ++g_stereo.shaderPerspectiveCandidates;
     }
@@ -4331,6 +4358,7 @@ HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveHook(IDirect3DDevice9* device, D3D
         tmoxr::VrBridge::Instance().OnDraw(true);
     }
     if (g_stereo.perspective) {
+        g_perspectiveDrawThisFrame = true;
         ++g_stereo.perspectiveDrawCandidates;
         if (g_stereo.customVertexShaderBound) ++g_stereo.shaderPerspectiveCandidates;
     }
@@ -4973,6 +5001,7 @@ public:
             }
             return result;
         }
+        RequestAlphaBackBuffer(*parameters);
         HRESULT result = real_->CreateDevice(a,type,window,flags,parameters,device);
         if (FAILED(result) && nativeFallback_) {
             tmoxr::log::Warn("D3D9On12 device creation failed; retrying with native D3D9. HRESULT=" +
