@@ -170,16 +170,16 @@ DWORD SyncWaitMilliseconds() {
     if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_SYNC_WAIT_MS", value, 16)) return kDefaultSyncWaitMilliseconds;
     return static_cast<DWORD>(std::clamp(_wtoi(value), 0, 50));
 }
-// Menu navigation keys. Driving goes through the virtual joypad, so only
-// controls TrackMania does not need while driving are mapped: the right stick
-// to the arrow keys, A to Enter and B to Esc. WinlatorXR leaves these buttons
-// unmapped by default. Keys are injected with scan codes because TrackMania
-// reads the keyboard through DirectInput.
+// Menu navigation keys: in menus (flat screen) the left stick sends the arrow
+// keys; in races it steers through the virtual joypad instead. A sends Enter
+// and B Esc. WinlatorXR leaves these buttons unmapped by default. Keys are
+// injected with scan codes because TrackMania reads the keyboard through
+// DirectInput.
 class MenuKeyMapper {
 public:
-    void Update(const ControllerState& state) {
-        const float x = state.rightStick[0];
-        const float y = state.rightStick[1];
+    void Update(const ControllerState& state, bool menu) {
+        const float x = menu ? state.leftStick[0] : 0.0f;
+        const float y = menu ? state.leftStick[1] : 0.0f;
         Set(Key::Left, StickPressed(Key::Left, -x));
         Set(Key::Right, StickPressed(Key::Right, x));
         Set(Key::Up, StickPressed(Key::Up, y));
@@ -437,7 +437,11 @@ struct VrBridge::Impl {
             if (ParseTrackingMessage(buffer.data(), static_cast<size_t>(length), sample)) {
                 latest = std::move(sample);
                 haveLatest = true;
-                PublishControllerState(latest.controller);
+                // In menus the left stick navigates with the arrow keys, so
+                // the joypad reports it centred.
+                ControllerState published = latest.controller;
+                if (!windowStereo) published.leftStick[0] = published.leftStick[1] = 0.0f;
+                PublishControllerState(published);
                 ++receivedSamples;
                 received = true;
                 lastSampleTick = GetTickCount64();
@@ -600,7 +604,7 @@ struct VrBridge::Impl {
         if (GetTickCount64() - lastModeSend >= kModeResendMilliseconds) SendMode(true);
         // Release held keys when WinlatorXR stops streaming (paused, closed).
         if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) {
-            keyMapper.Update(latest.controller);
+            keyMapper.Update(latest.controller, !windowStereo);
         } else {
             keyMapper.ReleaseAll();
             PublishControllerState({});
