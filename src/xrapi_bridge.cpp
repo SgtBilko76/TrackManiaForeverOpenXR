@@ -11,6 +11,7 @@
 
 #include "vr_bridge.h"
 
+#include "controller_input.h"
 #include "log.h"
 
 #include <winsock2.h>
@@ -40,6 +41,8 @@ constexpr float kPi = 3.14159265358979f;
 // Field offsets after the leading "clientN" token.
 constexpr size_t kLeftThumbstickX = 4;
 constexpr size_t kLeftThumbstickY = 5;
+constexpr size_t kRightThumbstickX = 13;
+constexpr size_t kRightThumbstickY = 14;
 constexpr size_t kHeadOrientation = 18;
 constexpr size_t kHeadPosition = 22;
 constexpr size_t kIpd = 25;
@@ -47,10 +50,8 @@ constexpr size_t kFovX = 26;
 constexpr size_t kFovY = 27;
 constexpr size_t kSync = 28;
 constexpr size_t kFloatCount = 29;
-// Button string order: L_GRIP, L_MENU, L_THUMBSTICK_PRESS, ... WinlatorXR maps
-// every other button to keys/mouse and opens its menu (including its VR
-// keyboard) with the right thumbstick press, so only the left press is free.
-constexpr size_t kLeftThumbstickPress = 2;
+// The right thumbstick press opens WinlatorXR's menu (and its VR keyboard);
+// holding the left press recenters.
 constexpr ULONGLONG kRecenterHoldMilliseconds = 1000;
 
 struct Quaternion { float x, y, z, w; };
@@ -90,13 +91,12 @@ struct TrackingSample {
     float fovXDegrees = 0.0f;
     float fovYDegrees = 0.0f;
     int sync = 0;
-    float leftThumbstickX = 0.0f;
-    float leftThumbstickY = 0.0f;
-    std::string buttons;
+    ControllerState controller;
 };
 
 bool ParseTrackingMessage(const char* text, size_t length, TrackingSample& sample) {
     std::array<float, kFloatCount> values{};
+    std::string buttons;
     size_t floatCount = 0;
     const char* cursor = text;
     const char* const end = text + length;
@@ -113,8 +113,8 @@ bool ParseTrackingMessage(const char* text, size_t length, TrackingSample& sampl
             const auto result = std::from_chars(cursor, tokenEnd, value);
             if (result.ec != std::errc()) return false;
             values[floatCount++] = value;
-        } else if (sample.buttons.empty()) {
-            sample.buttons.assign(cursor, tokenEnd);
+        } else if (buttons.empty()) {
+            buttons.assign(cursor, tokenEnd);
             break;
         }
         first = false;
@@ -128,13 +128,23 @@ bool ParseTrackingMessage(const char* text, size_t length, TrackingSample& sampl
     sample.fovXDegrees = values[kFovX];
     sample.fovYDegrees = values[kFovY];
     sample.sync = std::clamp(static_cast<int>(std::lround(values[kSync])), 0, 255);
-    sample.leftThumbstickX = values[kLeftThumbstickX];
-    sample.leftThumbstickY = values[kLeftThumbstickY];
+    sample.controller.leftStick[0] = values[kLeftThumbstickX];
+    sample.controller.leftStick[1] = values[kLeftThumbstickY];
+    sample.controller.rightStick[0] = values[kRightThumbstickX];
+    sample.controller.rightStick[1] = values[kRightThumbstickY];
+    for (size_t index = 0; index < buttons.size() && index < 32; ++index) {
+        if (buttons[index] == 'T') sample.controller.buttons |= 1u << index;
+    }
+    sample.controller.connected = true;
     return true;
 }
 
-bool ButtonPressed(const std::string& buttons, size_t index) {
-    return index < buttons.size() && buttons[index] == 'T';
+std::mutex g_controllerMutex;
+ControllerState g_controllerState;
+
+void PublishControllerState(const ControllerState& state) {
+    std::lock_guard lock(g_controllerMutex);
+    g_controllerState = state;
 }
 
 std::wstring ApiDirectory() {
@@ -153,25 +163,22 @@ DWORD SyncWaitMilliseconds() {
     if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_SYNC_WAIT_MS", value, 16)) return kDefaultSyncWaitMilliseconds;
     return static_cast<DWORD>(std::clamp(_wtoi(value), 0, 50));
 }
-// Driving controls on the left controller and A/B/X/Y. WinlatorXR leaves
-// these buttons unmapped by default; its right controller stays the mouse
-// (trigger = click), left Menu is Esc, and the right thumbstick press opens
-// its menu. Keys are injected with scan codes because TrackMania reads the
-// keyboard through DirectInput.
-class ControllerKeyMapper {
+// Menu navigation keys. Driving goes through the virtual joypad, so only
+// controls TrackMania does not need while driving are mapped: the right stick
+// to the arrow keys, A to Enter and B to Esc. WinlatorXR leaves these buttons
+// unmapped by default. Keys are injected with scan codes because TrackMania
+// reads the keyboard through DirectInput.
+class MenuKeyMapper {
 public:
-    void Update(const TrackingSample& sample) {
-        const auto button = [&](size_t index) { return ButtonPressed(sample.buttons, index); };
-        const float x = sample.leftThumbstickX;
-        const float y = sample.leftThumbstickY;
+    void Update(const ControllerState& state) {
+        const float x = state.rightStick[0];
+        const float y = state.rightStick[1];
         Set(Key::Left, StickPressed(Key::Left, -x));
         Set(Key::Right, StickPressed(Key::Right, x));
-        Set(Key::Up, StickPressed(Key::Up, y) || button(kLeftTrigger));
-        Set(Key::Down, StickPressed(Key::Down, -y) || button(kLeftGrip));
-        Set(Key::Enter, button(kButtonA));
-        Set(Key::Backspace, button(kButtonB));
-        Set(Key::Camera3, button(kButtonX));
-        Set(Key::Camera1, button(kButtonY));
+        Set(Key::Up, StickPressed(Key::Up, y));
+        Set(Key::Down, StickPressed(Key::Down, -y));
+        Set(Key::Enter, state.Pressed(kButtonA));
+        Set(Key::Escape, state.Pressed(kButtonB));
     }
 
     void ReleaseAll() {
@@ -179,18 +186,12 @@ public:
     }
 
 private:
-    enum class Key : size_t { Left, Right, Up, Down, Enter, Backspace, Camera3, Camera1 };
-    static constexpr size_t kKeyCount = 8;
+    enum class Key : size_t { Left, Right, Up, Down, Enter, Escape };
+    static constexpr size_t kKeyCount = 6;
     struct KeyCode { WORD virtualKey; bool extended; };
     static constexpr std::array<KeyCode, kKeyCount> kKeyCodes{{
         {VK_LEFT, true}, {VK_RIGHT, true}, {VK_UP, true}, {VK_DOWN, true},
-        {VK_RETURN, false}, {VK_BACK, false}, {'3', false}, {'1', false}}};
-    static constexpr size_t kLeftGrip = 0;
-    static constexpr size_t kLeftTrigger = 7;
-    static constexpr size_t kButtonX = 8;
-    static constexpr size_t kButtonY = 9;
-    static constexpr size_t kButtonA = 10;
-    static constexpr size_t kButtonB = 11;
+        {VK_RETURN, false}, {VK_ESCAPE, false}}};
     // Hysteresis keeps a stick resting near the threshold from chattering.
     static constexpr float kStickPress = 0.5f;
     static constexpr float kStickRelease = 0.35f;
@@ -219,7 +220,8 @@ private:
             const HWND foreground = GetForegroundWindow();
             if (foreground) GetWindowTextA(foreground, title, sizeof(title));
             log::Info("XrAPI: first controller key sent (virtual key " + std::to_string(code.virtualKey) +
-                ", SendInput=" + std::to_string(sent) + ", error=" + std::to_string(sendError) + ", foreground window \"" + title + "\").");
+                ", SendInput=" + std::to_string(sent) + ", error=" + std::to_string(sendError) +
+                ", foreground window \"" + title + "\").");
         }
     }
 
@@ -261,7 +263,7 @@ struct VrBridge::Impl {
     bool recenterGestureConsumed = false;
     bool recenterOnTrackingJump = true;
     bool verboseDiagnostics = false;
-    ControllerKeyMapper keyMapper;
+    MenuKeyMapper keyMapper;
     ULONGLONG lastSampleTick = 0;
 
     HeadPose headPose{};
@@ -363,6 +365,7 @@ struct VrBridge::Impl {
 
     void Close() {
         keyMapper.ReleaseAll();
+        PublishControllerState({});
         if (socket != INVALID_SOCKET) {
             if (initialized) SendMode(false);
             closesocket(socket);
@@ -384,6 +387,7 @@ struct VrBridge::Impl {
             if (ParseTrackingMessage(buffer.data(), static_cast<size_t>(length), sample)) {
                 latest = std::move(sample);
                 haveLatest = true;
+                PublishControllerState(latest.controller);
                 ++receivedSamples;
                 received = true;
                 lastSampleTick = GetTickCount64();
@@ -434,7 +438,7 @@ struct VrBridge::Impl {
     void UpdateHeadPose(const TrackingSample& sample) {
         // Holding avoids recentering on a stray click while steering.
         bool recenter = false;
-        if (ButtonPressed(sample.buttons, kLeftThumbstickPress)) {
+        if (sample.controller.Pressed(kLeftThumbstickPress)) {
             const ULONGLONG now = GetTickCount64();
             if (!recenterPressStart) recenterPressStart = now;
             if (!recenterGestureConsumed && now - recenterPressStart >= kRecenterHoldMilliseconds) {
@@ -514,8 +518,12 @@ struct VrBridge::Impl {
         WaitForNewSync();
         if (GetTickCount64() - lastModeSend >= kModeResendMilliseconds) SendMode(true);
         // Release held keys when WinlatorXR stops streaming (paused, closed).
-        if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) keyMapper.Update(latest);
-        else keyMapper.ReleaseAll();
+        if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) {
+            keyMapper.Update(latest.controller);
+        } else {
+            keyMapper.ReleaseAll();
+            PublishControllerState({});
+        }
         if (!haveLatest) return;
         frameLatched = true;
         frameSync = latest.sync;
@@ -639,5 +647,9 @@ void VrBridge::Shutdown() {
     }
     delete impl_;
     impl_ = nullptr;
+}
+ControllerState GetControllerState() {
+    std::lock_guard lock(g_controllerMutex);
+    return g_controllerState;
 }
 } // namespace tmoxr
