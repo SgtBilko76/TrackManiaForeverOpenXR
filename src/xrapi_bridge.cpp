@@ -158,6 +158,13 @@ std::wstring ApiDirectory() {
     return kDefaultApiDirectory;
 }
 
+// TMFOXR_XRAPI_FOV overrides the square field of view in degrees.
+float SquareFovOverride() {
+    wchar_t value[16]{};
+    if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_FOV", value, 16)) return 0.0f;
+    return std::clamp(static_cast<float>(_wtof(value)), 60.0f, 140.0f);
+}
+
 DWORD SyncWaitMilliseconds() {
     wchar_t value[16]{};
     if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_SYNC_WAIT_MS", value, 16)) return kDefaultSyncWaitMilliseconds;
@@ -269,6 +276,7 @@ struct VrBridge::Impl {
     bool initialized = false;
     bool permanentlyDisabled = false;
     DWORD syncWaitMilliseconds = kDefaultSyncWaitMilliseconds;
+    float squareFovDegrees = 0.0f;
 
     TrackingSample latest{};
     bool haveLatest = false;
@@ -381,8 +389,15 @@ struct VrBridge::Impl {
     void SendMode(bool enabled) {
         if (socket == INVALID_SOCKET) return;
         // L_HAPTICS R_HAPTICS MODE_VR MODE_3D FOVX FOVY. A FOV of 0 keeps the headset's own.
-        const char* message = enabled ? "0 0 1 1 0 0" : "0 0 0 0 0 0";
-        sendto(socket, message, static_cast<int>(std::strlen(message)), 0,
+        // std::to_chars is locale independent; WinlatorXR parses with Java's Float.
+        std::string message = "0 0 0 0 0 0";
+        if (enabled) {
+            char fov[32]{};
+            const auto end = std::to_chars(fov, fov + sizeof(fov), squareFovDegrees, std::chars_format::fixed, 2).ptr;
+            const std::string angle(fov, end);
+            message = "0 0 1 1 " + angle + " " + angle;
+        }
+        sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
         lastModeSend = GetTickCount64();
     }
@@ -514,11 +529,26 @@ struct VrBridge::Impl {
         return {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
     }
 
+    // WinlatorXR's reported FOV and the FOV of its projection layer disagree on
+    // which axis is which (the image appeared squeezed horizontally by ~0.8).
+    // Requesting the same angle for both axes, as the Halo mod does, removes
+    // the ambiguity; the larger reported angle keeps the whole view covered.
+    void ChooseSquareFov(const TrackingSample& sample) {
+        if (squareFovDegrees > 1.0f || sample.fovXDegrees <= 1.0f || sample.fovYDegrees <= 1.0f) return;
+        squareFovDegrees = SquareFovOverride();
+        if (squareFovDegrees <= 1.0f) squareFovDegrees = std::max(sample.fovXDegrees, sample.fovYDegrees);
+        log::Info("XrAPI: headset reported FOV " + std::to_string(sample.fovXDegrees) + "x" +
+            std::to_string(sample.fovYDegrees) + " degrees; requesting " + std::to_string(squareFovDegrees) +
+            "x" + std::to_string(squareFovDegrees) + ".");
+        SendMode(true);
+    }
+
     void UpdateRenderConfiguration(const TrackingSample& sample) {
         UpdateEyeSize();
-        if (!eyeWidth || !eyeHeight || sample.fovXDegrees <= 1.0f || sample.fovYDegrees <= 1.0f) return;
-        const float halfX = sample.fovXDegrees * kPi / 360.0f;
-        const float halfY = sample.fovYDegrees * kPi / 360.0f;
+        ChooseSquareFov(sample);
+        if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return;
+        const float halfX = squareFovDegrees * kPi / 360.0f;
+        const float halfY = halfX;
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
             eyes[0].angleRight == halfX && eyes[0].angleUp == halfY) return;
@@ -532,8 +562,8 @@ struct VrBridge::Impl {
         }
         ++renderConfiguration.sample;
         haveRenderConfiguration = true;
-        log::Info("XrAPI: headset FOV " + std::to_string(sample.fovXDegrees) + "x" +
-            std::to_string(sample.fovYDegrees) + " degrees, IPD " + std::to_string(sample.ipd) + " m.");
+        log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
+            " per eye with a " + std::to_string(squareFovDegrees) + " degree FOV, IPD " + std::to_string(sample.ipd) + " m.");
     }
 
     void BeginFrame() {

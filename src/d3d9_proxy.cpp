@@ -3289,9 +3289,10 @@ struct PanelVertex {
 };
 
 // Menus and HUD are shown on a panel fixed in the room, in front of the
-// recentered seat position, when the backend displays the window.
-constexpr float kWindowUiDistanceMeters = 1.4f;
-constexpr float kWindowUiWidthMeters = 1.8f;
+// recentered seat position, when the backend displays the window. About 77
+// degrees wide: close enough to read menus without leaning in.
+constexpr float kWindowUiDistanceMeters = 1.0f;
+constexpr float kWindowUiWidthMeters = 1.6f;
 constexpr float kWindowUiNearestDepthMeters = 0.05f;
 
 struct Vector3f {

@@ -21,11 +21,12 @@ import sys
 import time
 
 SYNC_STEP = 12
+FOV = (float(os.environ.get("FAKE_FOVX", "104")), float(os.environ.get("FAKE_FOVY", "98")))
 SYNC_LIMIT = 256
 
 
 def tracking_line(t: float, sync: int, presses) -> str:
-    yaw = math.radians(20.0) * math.sin(t * 0.5)
+    yaw = math.radians(float(os.environ.get("FAKE_YAW_DEG", "20"))) * math.sin(t * 0.5)
     head = (0.0, math.sin(yaw / 2), 0.0, math.cos(yaw / 2))
     left = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -0.2, 1.1, -0.3)
     right = (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.2, 1.1, -0.3)
@@ -35,7 +36,7 @@ def tracking_line(t: float, sync: int, presses) -> str:
         if index == -1 and start <= t < end:
             left_stick_x = 0.8
     left = left[:4] + (left_stick_x, 0.0) + left[6:]
-    floats = left + right + hmd + (0.064, 104.0, 98.0)
+    floats = left + right + hmd + (0.064, FOV[0], FOV[1])
     buttons = ["F"] * 19
     for index, start, end in presses:
         if index >= 0 and start <= t < end:

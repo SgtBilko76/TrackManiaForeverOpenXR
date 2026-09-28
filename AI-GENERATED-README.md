@@ -121,7 +121,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 
 - It detects WinlatorXR through `Z:\tmp\xr\system` and requests the API by writing `Z:\tmp\xr\version`. Without WinlatorXR it runs flat, like the OpenXR build does without a runtime.
 - Head tracking arrives over UDP 7872. The mod replies on UDP 7278 with "VR on, side-by-side".
-- Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.4 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
+- Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.6 m wide and 1.0 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
 - The Quest controllers appear in TrackMania as a DirectInput game controller named **Quest Controllers**. Bind it once under Profile → Controls:
@@ -140,6 +140,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Screen-space shaders that write `oPos` without a camera matrix (such as the menu background) are rewritten with D3DX so the stereo replay can keep them fixed in the room.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
 - For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
+- The mod requests a square field of view from WinlatorXR (the larger of the two reported angles, for example 108.9° × 108.9°) and renders with it. WinlatorXR's reported FOV and the FOV of its projection layer disagree on which axis is which, which squeezed the image horizontally by about 0.8. `TMFOXR_XRAPI_FOV` overrides the angle.
 - `TMFOXR_XRAPI_SYNC_WAIT_MS` (default 14, 0 disables) sets how long a frame may wait for a fresh headset pose. `TMFOXR_XRAPI_DIR` overrides `Z:\tmp\xr` for testing.
 
 Build it on Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):
