@@ -3511,16 +3511,23 @@ void CaptureFrameIfRequested(IDirect3DDevice9* device, IDirect3DSurface9* backBu
 // replace the desktop frame with both eyes side by side, add the captured UI,
 // and stamp the frame-sync pixel that pairs this frame with its head pose.
 void ComposeWindowPresentation(IDirect3DDevice9* device) {
-    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay() || WindowFlat()) return;
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
     tmoxr::WindowPresentation presentation{};
-    if (!g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
-        !g_stereo.packedEyesActive ||
-        !tmoxr::VrBridge::Instance().GetWindowPresentation(presentation)) return;
+    if (!tmoxr::VrBridge::Instance().GetWindowPresentation(presentation)) return;
 
     IDirect3DSurface9* backBuffer = nullptr;
     D3DSURFACE_DESC target{};
     if (FAILED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backBuffer))) return;
     if (FAILED(backBuffer->GetDesc(&target)) || target.Width < 2) {
+        backBuffer->Release();
+        return;
+    }
+    const RECT syncPixel{0, 0, 2, 2};
+    // Flat (menu) frames and frames without a finished eye pair keep the game
+    // image but still carry the sync pixel.
+    if (WindowFlat() || !g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
+        !g_stereo.packedEyesActive) {
+        device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
         backBuffer->Release();
         return;
     }
@@ -3537,6 +3544,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
             tmoxr::log::Warn("Could not copy the packed eye target into the side-by-side window. HRESULT=" +
                 std::to_string(static_cast<long>(copy)));
         }
+        device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
         backBuffer->Release();
         return;
     }
@@ -3560,7 +3568,6 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
         }
     }
 
-    const RECT syncPixel{0, 0, 2, 2};
     device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
     CaptureFrameIfRequested(device, backBuffer, target);
     backBuffer->Release();

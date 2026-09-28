@@ -305,6 +305,11 @@ struct VrBridge::Impl {
     bool haveRenderConfiguration = false;
 
     uint64_t presentedFrames = 0;
+    // Headset frames between latching a pose and presenting the frame.
+    // WinlatorXR keeps only 22 poses (sync values 0..252 in steps of 12).
+    uint64_t syncAgeTotal = 0;
+    int syncAgeMax = 0;
+    uint64_t syncAgeSamples = 0;
     uint64_t syncWaits = 0;
     uint64_t repeatedSyncFrames = 0;
 
@@ -611,6 +616,22 @@ struct VrBridge::Impl {
     void EndFrame() {
         if (!initialized) return;
         if (presentedFrames == 300) LogWindowLayout();
+        if (frameLatched && windowStereo) {
+            Drain();
+            constexpr int kSyncSlots = 22;
+            const int age = ((latest.sync - frameSync) / 12 % kSyncSlots + kSyncSlots) % kSyncSlots;
+            syncAgeTotal += static_cast<uint64_t>(age);
+            syncAgeMax = std::max(syncAgeMax, age);
+            if (++syncAgeSamples == 600) {
+                log::Info("XrAPI: pose age at present over 600 VR frames: average " +
+                    std::to_string(static_cast<double>(syncAgeTotal) / 600.0) + ", maximum " +
+                    std::to_string(syncAgeMax) + " headset frames (WinlatorXR keeps " +
+                    std::to_string(kSyncSlots) + ").");
+                syncAgeTotal = 0;
+                syncAgeMax = 0;
+                syncAgeSamples = 0;
+            }
+        }
         if (frameLatched) {
             if (frameSync == lastPresentedSync) ++repeatedSyncFrames;
             lastPresentedSync = frameSync;
@@ -634,7 +655,10 @@ bool VrBridge::UsesGameWindowAsDisplay() { return true; }
 bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
     if (!impl_) return false;
     std::scoped_lock lock(impl_->mutex);
-    if (!impl_->initialized || !impl_->windowStereo || !impl_->frameLatched || impl_->frameSync < 0) return false;
+    // Also valid in flat mode: every frame carries a sync pixel, because
+    // WinlatorXR learns its sync colour mapping from whatever pixel it reads
+    // and a game-image pixel around a mode switch would corrupt it.
+    if (!impl_->initialized || !impl_->frameLatched || impl_->frameSync < 0) return false;
     // Green must stay 0 and alpha non-zero; blue 0 selects the left/SBS target.
     presentation.syncColor = D3DCOLOR_ARGB(255, impl_->frameSync, 0, 0);
     return true;
