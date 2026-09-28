@@ -34,9 +34,12 @@ constexpr char kApiVersion[] = "0.5";
 constexpr wchar_t kDefaultApiDirectory[] = L"Z:\\tmp\\xr";
 constexpr ULONGLONG kModeResendMilliseconds = 500;
 constexpr DWORD kDefaultSyncWaitMilliseconds = 14;
+constexpr ULONGLONG kInputTimeoutMilliseconds = 300;
 constexpr float kPi = 3.14159265358979f;
 
 // Field offsets after the leading "clientN" token.
+constexpr size_t kLeftThumbstickX = 4;
+constexpr size_t kLeftThumbstickY = 5;
 constexpr size_t kHeadOrientation = 18;
 constexpr size_t kHeadPosition = 22;
 constexpr size_t kIpd = 25;
@@ -87,6 +90,8 @@ struct TrackingSample {
     float fovXDegrees = 0.0f;
     float fovYDegrees = 0.0f;
     int sync = 0;
+    float leftThumbstickX = 0.0f;
+    float leftThumbstickY = 0.0f;
     std::string buttons;
 };
 
@@ -123,6 +128,8 @@ bool ParseTrackingMessage(const char* text, size_t length, TrackingSample& sampl
     sample.fovXDegrees = values[kFovX];
     sample.fovYDegrees = values[kFovY];
     sample.sync = std::clamp(static_cast<int>(std::lround(values[kSync])), 0, 255);
+    sample.leftThumbstickX = values[kLeftThumbstickX];
+    sample.leftThumbstickY = values[kLeftThumbstickY];
     return true;
 }
 
@@ -146,6 +153,79 @@ DWORD SyncWaitMilliseconds() {
     if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_SYNC_WAIT_MS", value, 16)) return kDefaultSyncWaitMilliseconds;
     return static_cast<DWORD>(std::clamp(_wtoi(value), 0, 50));
 }
+// Driving controls on the left controller and A/B/X/Y. WinlatorXR leaves
+// these buttons unmapped by default; its right controller stays the mouse
+// (trigger = click), left Menu is Esc, and the right thumbstick press opens
+// its menu. Keys are injected with scan codes because TrackMania reads the
+// keyboard through DirectInput.
+class ControllerKeyMapper {
+public:
+    void Update(const TrackingSample& sample) {
+        const auto button = [&](size_t index) { return ButtonPressed(sample.buttons, index); };
+        const float x = sample.leftThumbstickX;
+        const float y = sample.leftThumbstickY;
+        Set(Key::Left, StickPressed(Key::Left, -x));
+        Set(Key::Right, StickPressed(Key::Right, x));
+        Set(Key::Up, StickPressed(Key::Up, y) || button(kLeftTrigger));
+        Set(Key::Down, StickPressed(Key::Down, -y) || button(kLeftGrip));
+        Set(Key::Enter, button(kButtonA));
+        Set(Key::Backspace, button(kButtonB));
+        Set(Key::Camera3, button(kButtonX));
+        Set(Key::Camera1, button(kButtonY));
+    }
+
+    void ReleaseAll() {
+        for (size_t key = 0; key < kKeyCount; ++key) Set(static_cast<Key>(key), false);
+    }
+
+private:
+    enum class Key : size_t { Left, Right, Up, Down, Enter, Backspace, Camera3, Camera1 };
+    static constexpr size_t kKeyCount = 8;
+    struct KeyCode { WORD virtualKey; bool extended; };
+    static constexpr std::array<KeyCode, kKeyCount> kKeyCodes{{
+        {VK_LEFT, true}, {VK_RIGHT, true}, {VK_UP, true}, {VK_DOWN, true},
+        {VK_RETURN, false}, {VK_BACK, false}, {'3', false}, {'1', false}}};
+    static constexpr size_t kLeftGrip = 0;
+    static constexpr size_t kLeftTrigger = 7;
+    static constexpr size_t kButtonX = 8;
+    static constexpr size_t kButtonY = 9;
+    static constexpr size_t kButtonA = 10;
+    static constexpr size_t kButtonB = 11;
+    // Hysteresis keeps a stick resting near the threshold from chattering.
+    static constexpr float kStickPress = 0.5f;
+    static constexpr float kStickRelease = 0.35f;
+
+    bool StickPressed(Key key, float deflection) const {
+        return deflection >= (pressed_[static_cast<size_t>(key)] ? kStickRelease : kStickPress);
+    }
+
+    void Set(Key key, bool down) {
+        const size_t index = static_cast<size_t>(key);
+        if (pressed_[index] == down) return;
+        pressed_[index] = down;
+        const KeyCode code = kKeyCodes[index];
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = code.virtualKey;
+        input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(code.virtualKey, MAPVK_VK_TO_VSC));
+        input.ki.dwFlags = KEYEVENTF_SCANCODE | (code.extended ? KEYEVENTF_EXTENDEDKEY : 0) |
+                           (down ? 0 : KEYEVENTF_KEYUP);
+        SetLastError(ERROR_SUCCESS);
+        const UINT sent = SendInput(1, &input, sizeof(input));
+        const DWORD sendError = sent ? ERROR_SUCCESS : GetLastError();
+        if (!loggedFirstKey_ && down) {
+            loggedFirstKey_ = true;
+            char title[128]{};
+            const HWND foreground = GetForegroundWindow();
+            if (foreground) GetWindowTextA(foreground, title, sizeof(title));
+            log::Info("XrAPI: first controller key sent (virtual key " + std::to_string(code.virtualKey) +
+                ", SendInput=" + std::to_string(sent) + ", error=" + std::to_string(sendError) + ", foreground window \"" + title + "\").");
+        }
+    }
+
+    std::array<bool, kKeyCount> pressed_{};
+    bool loggedFirstKey_ = false;
+};
 } // namespace
 
 struct VrBridge::Impl {
@@ -181,6 +261,8 @@ struct VrBridge::Impl {
     bool recenterGestureConsumed = false;
     bool recenterOnTrackingJump = true;
     bool verboseDiagnostics = false;
+    ControllerKeyMapper keyMapper;
+    ULONGLONG lastSampleTick = 0;
 
     HeadPose headPose{};
     bool haveHeadPose = false;
@@ -280,6 +362,7 @@ struct VrBridge::Impl {
     }
 
     void Close() {
+        keyMapper.ReleaseAll();
         if (socket != INVALID_SOCKET) {
             if (initialized) SendMode(false);
             closesocket(socket);
@@ -303,6 +386,7 @@ struct VrBridge::Impl {
                 haveLatest = true;
                 ++receivedSamples;
                 received = true;
+                lastSampleTick = GetTickCount64();
             } else if (++rejectedSamples <= 3) {
                 log::Warn("XrAPI: ignored malformed tracking message: " +
                     std::string(buffer.data(), static_cast<size_t>(std::min(length, 160))));
@@ -429,6 +513,9 @@ struct VrBridge::Impl {
         Drain();
         WaitForNewSync();
         if (GetTickCount64() - lastModeSend >= kModeResendMilliseconds) SendMode(true);
+        // Release held keys when WinlatorXR stops streaming (paused, closed).
+        if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) keyMapper.Update(latest);
+        else keyMapper.ReleaseAll();
         if (!haveLatest) return;
         frameLatched = true;
         frameSync = latest.sync;
