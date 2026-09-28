@@ -69,6 +69,7 @@ target_include_directories(d3d9 PRIVATE
   "${dear_imgui_SOURCE_DIR}/backends"
 )
 if(TMFOXR_VR_BACKEND STREQUAL "XrAPI")
+  target_compile_definitions(d3d9 PRIVATE TMFOXR_LOG_BESIDE_MODULE)
   target_link_libraries(d3d9 PRIVATE dxguid ws2_32)
 else()
   target_link_libraries(d3d9 PRIVATE dxguid d3d11 dxgi)
