@@ -228,6 +228,30 @@ private:
     std::array<bool, kKeyCount> pressed_{};
     bool loggedFirstKey_ = false;
 };
+// WinlatorXR reads the sync pixel from the first X window it draws, so the
+// window layout decides whether it sees the game. Logged once for diagnosis.
+std::string DescribeWindow(HWND window) {
+    char className[128]{};
+    char title[128]{};
+    RECT rect{};
+    GetClassNameA(window, className, sizeof(className));
+    GetWindowTextA(window, title, sizeof(title));
+    GetWindowRect(window, &rect);
+    const auto xWindow = reinterpret_cast<uintptr_t>(GetPropA(window, "__wine_x11_whole_window"));
+    return std::string("class=\"") + className + "\" title=\"" + title + "\" rect=(" +
+        std::to_string(rect.left) + "," + std::to_string(rect.top) + ")-(" + std::to_string(rect.right) + "," +
+        std::to_string(rect.bottom) + ") x11=" + std::to_string(xWindow);
+}
+
+BOOL CALLBACK LogTopLevelWindow(HWND window, LPARAM) {
+    if (IsWindowVisible(window)) log::Info("XrAPI window layout: top-level " + DescribeWindow(window));
+    return TRUE;
+}
+
+void LogWindowLayout() {
+    log::Info("XrAPI window layout: desktop " + DescribeWindow(GetDesktopWindow()));
+    EnumWindows(&LogTopLevelWindow, 0);
+}
 } // namespace
 
 struct VrBridge::Impl {
@@ -534,6 +558,7 @@ struct VrBridge::Impl {
 
     void EndFrame() {
         if (!initialized) return;
+        if (presentedFrames == 300) LogWindowLayout();
         if (frameLatched) {
             if (frameSync == lastPresentedSync) ++repeatedSyncFrames;
             lastPresentedSync = frameSync;
