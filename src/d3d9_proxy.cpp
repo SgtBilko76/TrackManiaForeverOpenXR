@@ -409,6 +409,7 @@ struct ID3DXBuffer : public IUnknown {
     virtual DWORD STDMETHODCALLTYPE GetBufferSize() = 0;
 };
 using D3DXDisassembleShaderFn = HRESULT(WINAPI*)(const DWORD*, BOOL, LPCSTR, ID3DXBuffer**);
+using D3DXAssembleShaderFn = HRESULT(WINAPI*)(LPCSTR, UINT, const void*, void*, DWORD, ID3DXBuffer**, ID3DXBuffer**);
 PresentFn g_originalPresent = nullptr;
 BeginSceneFn g_originalBeginScene = nullptr;
 EndSceneFn g_originalEndScene = nullptr;
@@ -3565,6 +3566,136 @@ bool IsDesktopSpaceAdditiveSprite(IDirect3DDevice9* device) {
         (sourceBlend == D3DBLEND_ONE || sourceBlend == D3DBLEND_SRCALPHA);
 }
 
+// Screen-space shaders such as TrackMania's menu background write oPos without
+// a camera matrix, so stereo replay drew them identically in both eyes and
+// they followed the head. A rewritten copy sends the position through an
+// identity matrix in the top four constant registers, which replay adjusts per eye like any
+// other camera matrix. Outside the eye passes the copy renders identically.
+// Top four constant registers the device supports (c252 on DXVK). Chosen on
+// first use because some D3D9 implementations expose fewer than 256.
+UINT g_clipSpaceCameraRegister = 0;
+
+UINT ClipSpaceCameraRegister(IDirect3DDevice9* device) {
+    if (!g_clipSpaceCameraRegister) {
+        D3DCAPS9 caps{};
+        const UINT available = SUCCEEDED(device->GetDeviceCaps(&caps)) ? caps.MaxVertexShaderConst : 256u;
+        g_clipSpaceCameraRegister = std::min<UINT>(available, 256u) - 4u;
+    }
+    return g_clipSpaceCameraRegister;
+}
+constexpr int kMaxVertexShaderTemporaries = 12;
+std::vector<std::pair<IDirect3DVertexShader9*, IDirect3DVertexShader9*>> g_clipSpaceCameraShaders;
+
+IDirect3DVertexShader9* ClipSpaceCameraShaderFor(IDirect3DVertexShader9* shader) {
+    if (!shader) return nullptr;
+    for (const auto& [original, rewritten] : g_clipSpaceCameraShaders) {
+        if (original == shader) return rewritten;
+    }
+    return nullptr;
+}
+
+void BindClipSpaceCameraShader(IDirect3DDevice9* device, IDirect3DVertexShader9* rewritten) {
+    static constexpr float identity[16] = {
+        1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+        0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    g_originalSetVertexShader(device, rewritten);
+    std::memcpy(g_stereo.vertexShaderConstants.data() + g_clipSpaceCameraRegister * 4, identity, sizeof(identity));
+    for (UINT row = 0; row < 4; ++row) g_stereo.validVertexShaderConstants[g_clipSpaceCameraRegister + row] = true;
+    g_originalSetVertexShaderConstantF(device, g_clipSpaceCameraRegister, identity, 4);
+}
+
+IDirect3DVertexShader9* CreateClipSpaceCameraShader(IDirect3DVertexShader9* shader,
+                                                    const std::string& disassembly, HMODULE d3dx) {
+    const auto assemble = reinterpret_cast<D3DXAssembleShaderFn>(GetProcAddress(d3dx, "D3DXAssembleShader"));
+    IDirect3DDevice9* device = nullptr;
+    if (!assemble || FAILED(shader->GetDevice(&device))) return nullptr;
+    ClipSpaceCameraRegister(device);
+    device->Release();
+
+    std::vector<std::string> instructions;
+    int highestTemporary = -1;
+    bool writesPosition = false;
+    bool supported = false;
+    std::istringstream lines(disassembly);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const auto comment = line.find("//");
+        if (comment != std::string::npos) line.erase(comment);
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first == std::string::npos) continue;
+        line.erase(0, first);
+        std::istringstream tokens(line);
+        std::string opcode;
+        std::string destination;
+        tokens >> opcode >> destination;
+        if (opcode.rfind("vs_1_", 0) == 0 || opcode.rfind("vs_2_", 0) == 0) supported = true;
+        // Instructions after flow control or a return would skip the appended matrix.
+        if (opcode == "ret" || opcode == "call" || opcode == "callnz" || opcode.rfind("vs_3_", 0) == 0) return nullptr;
+        if (destination.rfind("oPos", 0) == 0) {
+            // A partial write would leave the rest of the temporary undefined.
+            if (destination != "oPos," && destination != "oPos.xyzw,") return nullptr;
+            writesPosition = true;
+        }
+        for (size_t position = line.find('r'); position != std::string::npos; position = line.find('r', position + 1)) {
+            if (position > 0 && std::isalnum(static_cast<unsigned char>(line[position - 1]))) continue;
+            if (position + 1 >= line.size() || !std::isdigit(static_cast<unsigned char>(line[position + 1]))) continue;
+            highestTemporary = std::max(highestTemporary, std::atoi(line.c_str() + position + 1));
+        }
+        for (size_t position = line.find('c'); position != std::string::npos; position = line.find('c', position + 1)) {
+            if (position > 0 && std::isalnum(static_cast<unsigned char>(line[position - 1]))) continue;
+            if (position + 1 < line.size() && (line[position + 1] == '[' ||
+                (std::isdigit(static_cast<unsigned char>(line[position + 1])) &&
+                 std::atoi(line.c_str() + position + 1) >= static_cast<int>(g_clipSpaceCameraRegister)))) {
+                return nullptr;  // Relative addressing or c252+ could collide with the matrix.
+            }
+        }
+        instructions.push_back(line);
+    }
+    const int temporary = highestTemporary + 1;
+    if (!supported || !writesPosition || temporary + 1 >= kMaxVertexShaderTemporaries) return nullptr;
+
+    const std::string temporaryName = "r" + std::to_string(temporary);
+    std::string source;
+    for (auto instruction : instructions) {
+        for (auto position = instruction.find("oPos"); position != std::string::npos;
+             position = instruction.find("oPos", position + temporaryName.size())) {
+            instruction.replace(position, 4, temporaryName);
+        }
+        source += instruction + "\n";
+    }
+    // x, y and w go through the camera matrix. Depth keeps the game's z/w, so a
+    // quad placed exactly on the far plane is not clipped by rounding error.
+    const std::string scratch = "r" + std::to_string(temporary + 1);
+    const auto matrixRow = [](UINT row) { return ", c" + std::to_string(g_clipSpaceCameraRegister + row) + "\n"; };
+    source += "dp4 oPos.x, " + temporaryName + matrixRow(0);
+    source += "dp4 oPos.y, " + temporaryName + matrixRow(1);
+    source += "dp4 " + scratch + ".w, " + temporaryName + matrixRow(3);
+    source += "rcp " + scratch + ".x, " + temporaryName + ".w\n";
+    source += "mul " + scratch + ".y, " + temporaryName + ".z, " + scratch + ".x\n";
+    source += "mul oPos.z, " + scratch + ".y, " + scratch + ".w\n";
+    source += "mov oPos.w, " + scratch + ".w\n";
+
+    ID3DXBuffer* bytecode = nullptr;
+    ID3DXBuffer* errors = nullptr;
+    const HRESULT assembled = assemble(source.c_str(), static_cast<UINT>(source.size()), nullptr, nullptr, 0,
+                                       &bytecode, &errors);
+    if (FAILED(assembled) || !bytecode) {
+        tmoxr::log::Warn("Could not rewrite a screen-space vertex shader for stereo: " +
+            (errors ? std::string(static_cast<const char*>(errors->GetBufferPointer())) : std::string("unknown error")));
+        if (errors) errors->Release();
+        if (bytecode) bytecode->Release();
+        return nullptr;
+    }
+    if (errors) errors->Release();
+    IDirect3DVertexShader9* rewritten = nullptr;
+    if (SUCCEEDED(shader->GetDevice(&device))) {
+        device->CreateVertexShader(static_cast<const DWORD*>(bytecode->GetBufferPointer()), &rewritten);
+        device->Release();
+    }
+    bytecode->Release();
+    return rewritten;
+}
+
 void AnalyzeVertexShader(IDirect3DVertexShader9* shader) {
     if (!shader || std::find(g_stereo.analyzedShaders.begin(), g_stereo.analyzedShaders.end(), shader) != g_stereo.analyzedShaders.end()) return;
     // TrackMania uses many material variants for the same scene. Every distinct
@@ -3598,7 +3729,10 @@ void AnalyzeVertexShader(IDirect3DVertexShader9* shader) {
 
     ID3DXBuffer* output = nullptr;
     if (FAILED(disassemble(bytecode.data(), FALSE, nullptr, &output)) || !output) return;
-    const std::string disassembly(static_cast<const char*>(output->GetBufferPointer()), output->GetBufferSize());
+    // The buffer size includes the terminating NUL; keep it out of the text so
+    // a rewritten shader's appended instructions are not cut off after it.
+    const char* const disassemblyText = static_cast<const char*>(output->GetBufferPointer());
+    const std::string disassembly(disassemblyText, strnlen(disassemblyText, output->GetBufferSize()));
     output->Release();
 
     bool positionMapped = false;
@@ -3609,6 +3743,20 @@ void AnalyzeVertexShader(IDirect3DVertexShader9* shader) {
             const UINT baseRegister = static_cast<UINT>(std::strtoul(disassembly.c_str() + constant + 3, nullptr, 10));
             g_stereo.shaderPositionInfo.push_back({shader, baseRegister});
             positionMapped = true;
+        }
+    }
+    if (!positionMapped) {
+        if (IDirect3DVertexShader9* rewritten = CreateClipSpaceCameraShader(shader, disassembly, d3dx)) {
+            g_clipSpaceCameraShaders.push_back({shader, rewritten});
+            g_stereo.shaderPositionInfo.push_back({shader, g_clipSpaceCameraRegister});
+            positionMapped = true;
+            IDirect3DDevice9* device = nullptr;
+            if (SUCCEEDED(shader->GetDevice(&device))) {
+                BindClipSpaceCameraShader(device, rewritten);
+                device->Release();
+            }
+            tmoxr::log::Info("Screen-space vertex shader rewritten for stereo (camera matrix at c" +
+                std::to_string(g_clipSpaceCameraRegister) + ").");
         }
     }
 
@@ -3661,7 +3809,10 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
     HWND cursorWindow = window;
     if (!cursorWindow && SUCCEEDED(device->GetCreationParameters(&creation))) cursorWindow = creation.hFocusWindow;
     RenderSettingsOverlay(device, cursorWindow);
-    if (!g_settingsOverlayOpen) CaptureMouseCursor(device, cursorWindow);
+    // Standalone headsets drive the game with controllers, so no pointer is drawn.
+    if (!g_settingsOverlayOpen && !tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
+        CaptureMouseCursor(device, cursorWindow);
+    }
     tmoxr::VrBridge::Instance().SetLeftEyeSurface(
         g_stereo.trackedLeftColor, g_stereo.trackedLeftSharedHandle, 0);
     tmoxr::VrBridge::Instance().SetRightEyeSurface(
@@ -3924,6 +4075,10 @@ HRESULT STDMETHODCALLTYPE SetVertexShaderHook(IDirect3DDevice9* device, IDirect3
     if (g_renderingSettingsOverlay) return g_originalSetVertexShader(device, shader);
     g_stereo.customVertexShaderBound = shader != nullptr;
     g_stereo.vertexShader = shader;
+    if (IDirect3DVertexShader9* rewritten = ClipSpaceCameraShaderFor(shader)) {
+        BindClipSpaceCameraShader(device, rewritten);
+        return D3D_OK;
+    }
     return g_originalSetVertexShader(device, shader);
 }
 
