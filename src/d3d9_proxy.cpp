@@ -2946,6 +2946,25 @@ D3DMATRIX MultiplyD3DMatrix(const D3DMATRIX& a, const D3DMATRIX& b) {
     return result;
 }
 
+// Logs the first distinct perspective projections TrackMania sets, for
+// diagnosing aspect-ratio problems.
+void LogPerspectiveProjection(IDirect3DDevice9* device, const D3DMATRIX& p) {
+    static std::vector<std::array<float, 2>> seen;
+    if (seen.size() >= 8) return;
+    for (const auto& scales : seen) {
+        if (std::abs(scales[0] - p._11) < 0.001f && std::abs(scales[1] - p._22) < 0.001f) return;
+    }
+    seen.push_back({p._11, p._22});
+    D3DVIEWPORT9 viewport{};
+    device->GetViewport(&viewport);
+    std::ostringstream text;
+    text << "Game perspective projection: _11=" << p._11 << " _22=" << p._22 << " _31=" << p._31 << " _32=" << p._32
+         << " (horizontal/vertical tangent ratio " << (p._11 != 0.0f ? std::abs(p._22 / p._11) : 0.0f)
+         << "), viewport " << viewport.X << "," << viewport.Y << " " << viewport.Width << "x" << viewport.Height
+         << ", primary " << g_stereo.primaryWidth << "x" << g_stereo.primaryHeight << ".";
+    tmoxr::log::Info(text.str());
+}
+
 void SetFixedFunctionEyePose(IDirect3DDevice9* device, float eyeOffsetMeters, bool rightEye) {
     const Matrix4 projectionColumn = EyeProjection(rightEye);
     D3DMATRIX projectionRow{};
@@ -3337,6 +3356,7 @@ void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backB
 
     std::vector<PanelVertex> vertices;
     vertices.reserve(12);
+    std::array<size_t, 2> eyeVertexCount{};
     for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
         // Match the scene cameras: left eye at the tracked head, right eye one
         // IPD to its right.
@@ -3377,6 +3397,7 @@ void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backB
         if (!visible) continue;
         vertices.insert(vertices.end(), {projected[0], projected[1], projected[2],
                                          projected[2], projected[1], projected[3]});
+        eyeVertexCount[eyeIndex] = 6;
     }
     if (vertices.empty()) return;
 
@@ -3391,7 +3412,9 @@ void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backB
     device->SetRenderState(D3DRS_ZENABLE, FALSE);
     device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
     device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
-    device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+    // Each eye's panel is clipped to its half; a panel near the edge of the
+    // view would otherwise spill into the other eye's image.
+    device->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
     device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
     device->SetRenderState(D3DRS_FOGENABLE, FALSE);
     device->SetRenderState(D3DRS_LIGHTING, FALSE);
@@ -3416,8 +3439,41 @@ void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backB
     device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
     device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
     device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
-    g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, static_cast<UINT>(vertices.size() / 3),
-                              vertices.data(), sizeof(PanelVertex));
+    size_t first = 0;
+    for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
+        if (!eyeVertexCount[eyeIndex]) continue;
+        const LONG left = static_cast<LONG>(eyeIndex * (target.Width / 2));
+        const RECT scissor{left, 0, left + static_cast<LONG>(target.Width / 2), static_cast<LONG>(target.Height)};
+        device->SetScissorRect(&scissor);
+        g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 2, vertices.data() + first, sizeof(PanelVertex));
+        first += eyeVertexCount[eyeIndex];
+    }
+}
+
+// Saves the composed side-by-side frame when TMFOXR-capture.txt exists beside
+// the DLL, so both eyes can be inspected exactly as the headset receives them.
+void CaptureFrameIfRequested(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, const D3DSURFACE_DESC& target) {
+    using SaveSurfaceFn = HRESULT(WINAPI*)(LPCWSTR, DWORD, IDirect3DSurface9*, const PALETTEENTRY*, const RECT*);
+    if (g_stereo.presentedFrames % 30 != 0) return;
+    const auto trigger = tmoxr::ModuleFilePath(L"TMFOXR-capture.txt");
+    if (GetFileAttributesW(trigger.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    DeleteFileW(trigger.c_str());
+    HMODULE d3dx = GetModuleHandleW(L"d3dx9_30.dll");
+    if (!d3dx) d3dx = LoadLibraryW(L"d3dx9_30.dll");
+    const auto save = d3dx ? reinterpret_cast<SaveSurfaceFn>(GetProcAddress(d3dx, "D3DXSaveSurfaceToFileW")) : nullptr;
+    IDirect3DSurface9* copy = nullptr;
+    if (!save || FAILED(device->CreateOffscreenPlainSurface(target.Width, target.Height, target.Format,
+                                                            D3DPOOL_SYSTEMMEM, &copy, nullptr))) {
+        tmoxr::log::Warn("Frame capture failed: D3DX or a system-memory surface is unavailable.");
+        return;
+    }
+    const auto output = tmoxr::ModuleFilePath(L"TMFOXR-frame.bmp");
+    constexpr DWORD kBmpFormat = 0;  // D3DXIFF_BMP
+    const HRESULT result = SUCCEEDED(device->GetRenderTargetData(backBuffer, copy))
+        ? save(output.c_str(), kBmpFormat, copy, nullptr, nullptr) : E_FAIL;
+    copy->Release();
+    tmoxr::log::Info(SUCCEEDED(result) ? "Saved the side-by-side frame to TMFOXR-frame.bmp."
+                                       : "Frame capture failed: HRESULT=" + std::to_string(static_cast<long>(result)));
 }
 
 // For backends that show the game window in the headset (WinlatorXR XrAPI):
@@ -3475,6 +3531,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
 
     const RECT syncPixel{0, 0, 2, 2};
     device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+    CaptureFrameIfRequested(device, backBuffer, target);
     backBuffer->Release();
 }
 
@@ -4041,6 +4098,7 @@ HRESULT STDMETHODCALLTYPE SetTransformHook(IDirect3DDevice9* device, D3DTRANSFOR
         g_stereo.projection = *matrix;
         g_stereo.perspective = nextPerspective;
         if (g_stereo.perspective) {
+            LogPerspectiveProjection(device, *matrix);
             g_stereo.perspectivePassSeen = true;
             tmoxr::VrBridge::Instance().OnGameProjection(*matrix);
         }

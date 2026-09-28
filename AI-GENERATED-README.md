@@ -162,6 +162,8 @@ To install:
 
 The Quest build writes `TMFOXR.log` beside `TMFOXR.dll` in the game folder, so `adb pull` can reach it. The settings file stays in `Documents\TrackMania`.
 
+Creating `TMFOXR-capture.txt` in the game folder (for example `adb shell touch /sdcard/Download/TmForever/TMFOXR-capture.txt`) makes the mod save the next side-by-side frame, both eyes exactly as WinlatorXR receives them, as `TMFOXR-frame.bmp`. The log also records the first perspective projections TrackMania uses ("Game perspective projection").
+
 `tests/fake_winlatorxr.py` imitates the WinlatorXR side, so the XrAPI build can be tested under desktop Wine.
 
 ## In-headset settings
