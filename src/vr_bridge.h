@@ -7,6 +7,8 @@ namespace tmoxr {
 struct HeadPose {
     float position[3]{};
     float orientation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    // Measured eye separation in metres; 0 when the backend does not report it.
+    float ipd = 0.0f;
     uint64_t sample = 0;
 };
 
@@ -30,7 +32,6 @@ struct WindowPresentation {
     // Written to the frame's top-left pixel so the host can pair the frame
     // with the head pose it was rendered from.
     D3DCOLOR syncColor = 0;
-    float ipdMeters = 0.064f;
 };
 
 class VrBridge {

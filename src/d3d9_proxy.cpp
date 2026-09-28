@@ -2830,6 +2830,14 @@ Matrix4 HorizonCorrectionMatrix() {
     return correction;
 }
 
+// TrackMania's projection reflects X, so the right eye's camera translation is
+// negative. Use the headset's measured IPD when the backend reports one.
+float RightEyeOffsetMeters() {
+    constexpr float kDefaultIpdMeters = 0.064f;
+    const float ipd = g_stereo.haveHeadPose ? g_stereo.headPose.ipd : 0.0f;
+    return -(ipd > 0.04f && ipd < 0.09f ? ipd : kDefaultIpdMeters);
+}
+
 Matrix4 HeadViewMatrix(float eyeOffsetMeters) {
     const float x = g_stereo.haveHeadPose ? g_stereo.headPose.orientation[0] : 0.0f;
     const float y = g_stereo.haveHeadPose ? g_stereo.headPose.orientation[1] : 0.0f;
@@ -3036,7 +3044,7 @@ void BeginTrackedEye(IDirect3DDevice9* device, bool rightEye, bool applyFixedFun
     // has the opposite sign from an ordinary positive-X projection.
     // A programmable vertex shader does not consume D3DTS_VIEW/PROJECTION.
     // Avoid six redundant transform state changes per mapped shader draw.
-    if (applyFixedFunctionPose) SetFixedFunctionEyePose(device, rightEye ? -0.064f : 0.0f, rightEye);
+    if (applyFixedFunctionPose) SetFixedFunctionEyePose(device, rightEye ? RightEyeOffsetMeters() : 0.0f, rightEye);
 }
 
 void RestoreGameEye(IDirect3DDevice9* device, bool restoreFixedFunctionPose,
@@ -3271,51 +3279,96 @@ struct PanelVertex {
     float v;
 };
 
-// Head-locked panel for menus and HUD when the backend displays the window.
+// Menus and HUD are shown on a panel fixed in the room, in front of the
+// recentered seat position, when the backend displays the window.
 constexpr float kWindowUiDistanceMeters = 1.4f;
 constexpr float kWindowUiWidthMeters = 1.8f;
+constexpr float kWindowUiNearestDepthMeters = 0.05f;
+
+struct Vector3f {
+    float x;
+    float y;
+    float z;
+};
+
+// Rotates v by the unit quaternion q = (x, y, z, w).
+Vector3f RotateByQuaternion(const float q[4], const Vector3f& v) {
+    const Vector3f twiceCross{
+        2.0f * (q[1] * v.z - q[2] * v.y),
+        2.0f * (q[2] * v.x - q[0] * v.z),
+        2.0f * (q[0] * v.y - q[1] * v.x)};
+    return {
+        v.x + q[3] * twiceCross.x + q[1] * twiceCross.z - q[2] * twiceCross.y,
+        v.y + q[3] * twiceCross.y + q[2] * twiceCross.x - q[0] * twiceCross.z,
+        v.z + q[3] * twiceCross.z + q[0] * twiceCross.y - q[1] * twiceCross.x};
+}
 
 void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer,
-                              const D3DSURFACE_DESC& target, float ipdMeters) {
-    const float halfWidthTangent = kWindowUiWidthMeters * 0.5f / kWindowUiDistanceMeters;
-    const float halfHeightTangent = halfWidthTangent *
+                              const D3DSURFACE_DESC& target) {
+    // Tracking space: +X right, +Y up, -Z forward from the recentered origin.
+    const float halfWidth = kWindowUiWidthMeters * 0.5f;
+    const float halfHeight = halfWidth *
         static_cast<float>(g_stereo.primaryHeight) / static_cast<float>(g_stereo.primaryWidth);
-    // Each eye sees a panel at distance d shifted by half the IPD.
-    const float disparityTangent = ipdMeters * 0.5f / kWindowUiDistanceMeters;
+    const std::array<Vector3f, 4> corners{{
+        {-halfWidth, halfHeight, -kWindowUiDistanceMeters},
+        {halfWidth, halfHeight, -kWindowUiDistanceMeters},
+        {-halfWidth, -halfHeight, -kWindowUiDistanceMeters},
+        {halfWidth, -halfHeight, -kWindowUiDistanceMeters}}};
+    constexpr std::array<std::array<float, 2>, 4> cornerTexture{{{0.0f, 0.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f}}};
+
+    const auto& pose = g_stereo.headPose;
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const float* orientation = g_stereo.haveHeadPose ? pose.orientation : identity;
+    const float inverseOrientation[4] = {-orientation[0], -orientation[1], -orientation[2], orientation[3]};
+    const Vector3f headPosition = g_stereo.haveHeadPose
+        ? Vector3f{pose.position[0], pose.position[1], pose.position[2]} : Vector3f{0.0f, 0.0f, 0.0f};
     const float eyeWidth = static_cast<float>(target.Width / 2);
     const float eyeHeight = static_cast<float>(target.Height);
 
-    std::array<PanelVertex, 12> vertices{};
+    std::vector<PanelVertex> vertices;
+    vertices.reserve(12);
     for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
+        // Match the scene cameras: left eye at the tracked head, right eye one
+        // IPD to its right.
+        Vector3f eyePosition = headPosition;
+        if (eyeIndex == 1) {
+            const Vector3f offset = RotateByQuaternion(orientation, {-RightEyeOffsetMeters(), 0.0f, 0.0f});
+            eyePosition = {eyePosition.x + offset.x, eyePosition.y + offset.y, eyePosition.z + offset.z};
+        }
         const auto& eye = g_stereo.renderConfiguration.eyes[eyeIndex];
         const float tangentLeft = std::tan(eye.angleLeft);
         const float tangentRight = std::tan(eye.angleRight);
         const float tangentDown = std::tan(eye.angleDown);
         const float tangentUp = std::tan(eye.angleUp);
-        const float centerTangent = eyeIndex == 0 ? disparityTangent : -disparityTangent;
-        const auto pixelX = [&](float tangent) {
-            return eyeWidth * static_cast<float>(eyeIndex) +
-                eyeWidth * (tangent - tangentLeft) / (tangentRight - tangentLeft) - 0.5f;
-        };
-        const auto pixelY = [&](float tangent) {
-            return eyeHeight * (tangentUp - tangent) / (tangentUp - tangentDown) - 0.5f;
-        };
-        const float left = pixelX(centerTangent - halfWidthTangent);
-        const float right = pixelX(centerTangent + halfWidthTangent);
-        const float top = pixelY(halfHeightTangent);
-        const float bottom = pixelY(-halfHeightTangent);
-        const PanelVertex topLeft{left, top, 0.0f, 1.0f, 0.0f, 0.0f};
-        const PanelVertex topRight{right, top, 0.0f, 1.0f, 1.0f, 0.0f};
-        const PanelVertex bottomLeft{left, bottom, 0.0f, 1.0f, 0.0f, 1.0f};
-        const PanelVertex bottomRight{right, bottom, 0.0f, 1.0f, 1.0f, 1.0f};
-        const size_t base = eyeIndex * 6;
-        vertices[base + 0] = topLeft;
-        vertices[base + 1] = topRight;
-        vertices[base + 2] = bottomLeft;
-        vertices[base + 3] = bottomLeft;
-        vertices[base + 4] = topRight;
-        vertices[base + 5] = bottomRight;
+
+        std::array<PanelVertex, 4> projected{};
+        bool visible = true;
+        for (size_t corner = 0; corner < corners.size() && visible; ++corner) {
+            const Vector3f view = RotateByQuaternion(inverseOrientation, {
+                corners[corner].x - eyePosition.x,
+                corners[corner].y - eyePosition.y,
+                corners[corner].z - eyePosition.z});
+            const float depth = -view.z;
+            if (depth < kWindowUiNearestDepthMeters) {
+                visible = false;
+                break;
+            }
+            const float tangentX = view.x / depth;
+            const float tangentY = view.y / depth;
+            // Pretransformed vertices with rhw = 1/depth keep texturing
+            // perspective-correct when the panel is seen at an angle.
+            projected[corner] = {
+                eyeWidth * static_cast<float>(eyeIndex) +
+                    eyeWidth * (tangentX - tangentLeft) / (tangentRight - tangentLeft) - 0.5f,
+                eyeHeight * (tangentUp - tangentY) / (tangentUp - tangentDown) - 0.5f,
+                0.0f, 1.0f / depth, cornerTexture[corner][0], cornerTexture[corner][1]};
+        }
+        // Looking far enough away puts the panel behind this eye.
+        if (!visible) continue;
+        vertices.insert(vertices.end(), {projected[0], projected[1], projected[2],
+                                         projected[2], projected[1], projected[3]});
     }
+    if (vertices.empty()) return;
 
     g_originalSetDepthStencilSurface(device, nullptr);
     if (FAILED(g_originalSetRenderTarget(device, 0, backBuffer))) return;
@@ -3353,7 +3406,8 @@ void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backB
     device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
     device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
     device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
-    g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, 4, vertices.data(), sizeof(PanelVertex));
+    g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, static_cast<UINT>(vertices.size() / 3),
+                              vertices.data(), sizeof(PanelVertex));
 }
 
 // For backends that show the game window in the headset (WinlatorXR XrAPI):
@@ -3396,7 +3450,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
             const bool beginTemporaryScene = !g_stereo.sceneActive;
             if (!beginTemporaryScene || SUCCEEDED(g_originalBeginScene(device))) {
                 g_renderingSettingsOverlay = true;
-                DrawWindowPresentationUi(device, backBuffer, target, presentation.ipdMeters);
+                DrawWindowPresentationUi(device, backBuffer, target);
                 g_renderingSettingsOverlay = false;
                 if (beginTemporaryScene) g_originalEndScene(device);
             }
@@ -3981,7 +4035,7 @@ HRESULT STDMETHODCALLTYPE DrawPrimitiveHook(IDirect3DDevice9* device, D3DPRIMITI
     ApplyShaderEyeState(device, shaderEye, 0.0f, false);
     const HRESULT left = g_originalDrawPrimitive(device, type, startVertex, primitiveCount);
     BeginTrackedEye(device, true, !shaderEye.active, false);
-    ApplyShaderEyeState(device, shaderEye, -0.064f, true);
+    ApplyShaderEyeState(device, shaderEye, RightEyeOffsetMeters(), true);
     const HRESULT right = g_originalDrawPrimitive(device, type, startVertex, primitiveCount);
     if (FAILED(right) && !g_stereo.rightDrawFailureLogged) {
         g_stereo.rightDrawFailureLogged = true;
@@ -4056,7 +4110,7 @@ HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveHook(IDirect3DDevice9* device, D3D
     ApplyShaderEyeState(device, shaderEye, 0.0f, false);
     const HRESULT left = g_originalDrawIndexedPrimitive(device, type, baseVertex, minVertex, vertexCount, startIndex, primitiveCount);
     BeginTrackedEye(device, true, !shaderEye.active, false);
-    ApplyShaderEyeState(device, shaderEye, -0.064f, true);
+    ApplyShaderEyeState(device, shaderEye, RightEyeOffsetMeters(), true);
     const HRESULT right = g_originalDrawIndexedPrimitive(device, type, baseVertex, minVertex, vertexCount, startIndex, primitiveCount);
     if (FAILED(right) && !g_stereo.rightDrawFailureLogged) {
         g_stereo.rightDrawFailureLogged = true;
