@@ -157,7 +157,7 @@ To install:
 
 1. Copy the game folder to the headset with the prepackaged TrackMania ModLoader (`TmForeverModLoader.zip` from [TMLoader](https://tomashu.dev/software/tmloader/)) unpacked on top.
 2. Run `scripts/deploy-quest.sh [/sdcard/Download/TmForever]`. It builds the DLL, pushes `TMFOXR.dll` and `TMFOXR.defaults.ini`, and adds `TMFOXR=TMFOXR.dll` to `ModLoader.ini`.
-3. In WinlatorXR, use DXVK for DirectX and launch `TmForever.exe`. The WinlatorXR screen resolution sets the per-eye resolution (half the width by the full height).
+3. In WinlatorXR, use DXVK for DirectX and launch `TmForever.exe` **through a WinlatorXR shortcut** (in the container's desktop, right-click `TmForever.exe` → create shortcut, then start it from WinlatorXR's shortcut list). Only shortcut launches hide the Wine desktop window. Otherwise WinlatorXR reads the frame-sync pixel from the desktop instead of the game, every frame is shown with a stale head pose, and the image warps when the head moves. `TMFOXR.log` lists the window layout ("XrAPI window layout") 300 frames after start. The WinlatorXR screen resolution sets the per-eye resolution (half the width by the full height).
 
 The Quest build writes `TMFOXR.log` beside `TMFOXR.dll` in the game folder, so `adb pull` can reach it. The settings file stays in `Documents\TrackMania`.
 
