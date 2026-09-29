@@ -343,6 +343,8 @@ struct VrBridge::Impl {
     bool haveRenderConfiguration = false;
 
     uint64_t presentedFrames = 0;
+    static constexpr uint64_t kFramesBeforeVr = 90;
+    uint64_t framesSinceDevice = 0;
     // Headset frames between latching a pose and presenting the frame.
     // WinlatorXR keeps only 22 poses (sync values 0..252 in steps of 12).
     uint64_t syncAgeTotal = 0;
@@ -434,7 +436,12 @@ struct VrBridge::Impl {
         if (socket == INVALID_SOCKET) return;
         // L_HAPTICS R_HAPTICS MODE_VR MODE_3D FOVX FOVY: side-by-side VR with
         // the headset's natural FOV (0 = no custom FOV), or everything off.
-        const std::string message = enabled ? "0 0 1 1 0 0" : "0 0 0 0 0 0";
+        // Until the game has presented a few frames after device creation or
+        // reset, WinlatorXR stays in screen mode (2): in VR mode it reads the
+        // sync marker from the game window, and reading a window whose
+        // contents were not presented yet crashed it (Drawable.copyArea).
+        const bool ready = framesSinceDevice >= kFramesBeforeVr;
+        const std::string message = !enabled ? "0 0 0 0 0 0" : (ready ? "0 0 1 1 0 0" : "0 0 2 0 0 0");
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
         lastModeSend = GetTickCount64();
@@ -702,6 +709,10 @@ struct VrBridge::Impl {
 
     void EndFrame() {
         if (!initialized) return;
+        if (++framesSinceDevice == kFramesBeforeVr) {
+            log::Info("XrAPI: the game window has been presented; switching WinlatorXR to VR.");
+            SendMode(true);
+        }
         if (presentedFrames == 300) LogWindowLayout();
         if (frameLatched) {
             Drain();
@@ -768,6 +779,8 @@ void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAME
     impl_->device->AddRef();
     impl_->present = parameters;
     impl_->eyeSizeDirty = true;
+    impl_->framesSinceDevice = 0;
+    if (impl_->initialized) impl_->SendMode(true);
 }
 
 bool VrBridge::TryInitialize() {
@@ -793,6 +806,8 @@ void VrBridge::OnBeforeReset() {
     std::scoped_lock lock(impl_->mutex);
     impl_->eyeSizeDirty = true;
     impl_->frameLatched = false;
+    impl_->framesSinceDevice = 0;
+    if (impl_->initialized) impl_->SendMode(true);
 }
 
 void VrBridge::OnTransform(D3DTRANSFORMSTATETYPE, const D3DMATRIX&) {}
