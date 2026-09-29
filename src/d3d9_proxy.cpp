@@ -3741,14 +3741,23 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
         backBuffer->Release();
         return;
     }
-    const RECT syncPixel{0, 0, 2, 2};
+    // Like the Halo mod (HWXR), which works with WinlatorXR: a 10x10 marker
+    // at the top-left of each eye's half, in case the sync is read per eye.
+    const auto paintSync = [&] {
+        const LONG size = 10;
+        const LONG half = static_cast<LONG>(target.Width / 2);
+        const RECT leftEye{0, 0, size, size};
+        const RECT rightEye{half, 0, half + size, size};
+        device->ColorFill(backBuffer, &leftEye, presentation.syncColor);
+        device->ColorFill(backBuffer, &rightEye, presentation.syncColor);
+    };
     // Menus: the unmodified game frame goes onto the curved screen in VR.
     if (WindowFlat() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
     // Frames without a finished eye pair keep their image but still carry
     // the sync pixel.
     if (WindowFlat() || !g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
         !g_stereo.packedEyesActive) {
-        device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+        paintSync();
         CaptureFrameIfRequested(device, backBuffer, target);
         backBuffer->Release();
         return;
@@ -3766,7 +3775,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
             tmoxr::log::Warn("Could not copy the packed eye target into the side-by-side window. HRESULT=" +
                 std::to_string(static_cast<long>(copy)));
         }
-        device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+        paintSync();
         backBuffer->Release();
         return;
     }
@@ -3790,7 +3799,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
         }
     }
 
-    device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);
+    paintSync();
     CaptureFrameIfRequested(device, backBuffer, target);
     backBuffer->Release();
 }
