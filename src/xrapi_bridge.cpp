@@ -546,7 +546,7 @@ struct VrBridge::Impl {
         }
 
         const Quaternion inverseBase = Conjugate(baseOrientation);
-        const Quaternion relativeOrientation = Multiply(inverseBase, sample.headOrientation);
+        const Quaternion relativeOrientation = ApplyRollMode(Multiply(inverseBase, sample.headOrientation));
         const Vector3 delta{sample.headPosition.x - basePosition.x,
                             sample.headPosition.y - basePosition.y,
                             sample.headPosition.z - basePosition.z};
@@ -569,6 +569,34 @@ struct VrBridge::Impl {
         headPose.ipd = frameIpd;
         ++headPose.sample;
         haveHeadPose = true;
+    }
+
+    // Diagnostic: TMFOXR-roll.txt beside the DLL selects how head roll reaches
+    // the renderer (0 as tracked, 1 mirrored, 2 removed), re-read every second.
+    int rollMode = 0;
+    ULONGLONG lastRollCheck = 0;
+    Quaternion ApplyRollMode(const Quaternion& orientation) {
+        if (GetTickCount64() - lastRollCheck >= 1000) {
+            lastRollCheck = GetTickCount64();
+            int mode = 0;
+            std::ifstream file(ModuleFilePath(L"TMFOXR-roll.txt"));
+            if (!(file >> mode) || mode < 0 || mode > 2) mode = 0;
+            if (mode != rollMode) {
+                log::Info("XrAPI: head roll mode " + std::to_string(mode) + (mode == 1 ? " (mirrored)." : mode == 2 ? " (removed)." : " (as tracked)."));
+            }
+            rollMode = mode;
+        }
+        if (rollMode == 0) return orientation;
+        // Split into yaw/pitch (from the view direction) and roll about it.
+        const Vector3 forward = Rotate(orientation, {0.0f, 0.0f, -1.0f});
+        const float yaw = std::atan2(-forward.x, -forward.z);
+        const float pitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f));
+        const Quaternion yawOnly{0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+        const Quaternion pitchOnly{std::sin(pitch * 0.5f), 0.0f, 0.0f, std::cos(pitch * 0.5f)};
+        const Quaternion yawPitch = Multiply(yawOnly, pitchOnly);
+        if (rollMode == 2) return yawPitch;
+        const Quaternion roll = Multiply(Conjugate(yawPitch), orientation);
+        return Multiply(yawPitch, Conjugate(roll));
     }
 
     // Recentering keeps the player's pitch and roll relative to gravity.
