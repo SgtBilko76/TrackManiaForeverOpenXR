@@ -441,7 +441,13 @@ struct VrBridge::Impl {
         // sync marker from the game window, and reading a window whose
         // contents were not presented yet crashed it (Drawable.copyArea).
         const bool ready = framesSinceDevice >= kFramesBeforeVr;
-        const std::string message = !enabled ? "0 0 0 0 0 0" : (ready ? "0 0 1 1 0 0" : "0 0 2 0 0 0");
+        std::string fov = "0 0";
+        if (requestedFovDegrees > 1.0f) {
+            char text[32]{};
+            const auto end = std::to_chars(text, text + sizeof(text), requestedFovDegrees, std::chars_format::fixed, 2).ptr;
+            fov = std::string(text, end) + " " + std::string(text, end);
+        }
+        const std::string message = !enabled ? "0 0 0 0 0 0" : ((ready ? "0 0 1 1 " : "0 0 2 0 ") + fov);
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
         lastModeSend = GetTickCount64();
@@ -574,6 +580,24 @@ struct VrBridge::Impl {
     // Diagnostic: TMFOXR-roll.txt beside the DLL selects how head roll reaches
     // the renderer (0 as tracked, 1 mirrored, 2 removed), re-read every second.
     int rollMode = 0;
+
+    // Diagnostic like the Halo mod: TMFOXR-fov.txt beside the DLL holds a FOV
+    // in degrees that is requested from WinlatorXR for both axes and rendered
+    // exactly (re-read every second). Without the file the headset FOV is used.
+    float requestedFovDegrees = 0.0f;
+    ULONGLONG lastFovCheck = 0;
+    void ReloadRequestedFov() {
+        if (GetTickCount64() - lastFovCheck < 1000) return;
+        lastFovCheck = GetTickCount64();
+        float value = 0.0f;
+        std::ifstream file(ModuleFilePath(L"TMFOXR-fov.txt"));
+        if (!(file >> value) || value < 60.0f || value > 140.0f) value = 0.0f;
+        if (value == requestedFovDegrees) return;
+        requestedFovDegrees = value;
+        log::Info(value > 0.0f ? "XrAPI: requesting and rendering a square " + std::to_string(value) + " degree FOV."
+                               : std::string("XrAPI: using the headset FOV again."));
+        SendMode(true);
+    }
     ULONGLONG lastRollCheck = 0;
     Quaternion ApplyRollMode(const Quaternion& orientation) {
         if (GetTickCount64() - lastRollCheck >= 1000) {
@@ -710,8 +734,12 @@ struct VrBridge::Impl {
         UpdateEyeSize();
         CaptureFov(sample);
         if (!eyeWidth || !eyeHeight || fovXDegrees <= 1.0f) return;
-        const float halfX = std::atan(std::tan(RenderedHorizontalFovDegrees() * kPi / 360.0f) / horizontalScale);
-        const float halfY = std::atan(std::tan(fovYDegrees * kPi / 360.0f) / verticalScale);
+        ReloadRequestedFov();
+        const bool square = requestedFovDegrees > 1.0f;
+        const float halfX = square ? requestedFovDegrees * kPi / 360.0f
+            : std::atan(std::tan(RenderedHorizontalFovDegrees() * kPi / 360.0f) / horizontalScale);
+        const float halfY = square ? requestedFovDegrees * kPi / 360.0f
+            : std::atan(std::tan(fovYDegrees * kPi / 360.0f) / verticalScale);
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
             eyes[0].angleRight == halfX && eyes[0].angleUp == halfY) return;
