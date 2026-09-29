@@ -686,47 +686,39 @@ WindowFitResult EvaluateWindowFit(HWND window, const D3DPRESENT_PARAMETERS& para
 // kept its framed 1920x1080 window while rendering a screen-sized backbuffer,
 // so Present scaled the side-by-side frame into part of the screen: the eyes
 // were squeezed (about 0.8), overlapped and the sync marker was not where
-// WinlatorXR reads it. The window is made borderless, placed at the origin
-// and sized to the screen, with a backbuffer of exactly that size.
-bool ScreenSize(UINT& width, UINT& height) {
-    width = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
-    height = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
-    return width > 0 && height > 0;
-}
-
-void CoverScreenWithWindow(HWND window) {
-    if (!window || !IsWindow(window)) return;
-    UINT width = 0;
-    UINT height = 0;
-    if (!ScreenSize(width, height)) return;
-    RECT rect{};
-    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
-    const LONG_PTR popupStyle = (style & ~(WS_OVERLAPPEDWINDOW | WS_DLGFRAME | WS_BORDER)) | WS_POPUP | WS_VISIBLE;
-    if (GetWindowRect(window, &rect) && rect.left == 0 && rect.top == 0 &&
-        rect.right == static_cast<LONG>(width) && rect.bottom == static_cast<LONG>(height) && style == popupStyle) {
-        return;
+// WinlatorXR reads it. Resizing the window ourselves raced with TrackMania,
+// which resizes it back on every reset, and crashed WinlatorXR while it read
+// the sync marker. The game is therefore switched to real fullscreen at the
+// screen resolution, where Wine sizes the window once, as when it ran stably.
+bool ScreenMode(UINT& width, UINT& height, UINT& refresh) {
+    DEVMODEW mode{};
+    mode.dmSize = sizeof(mode);
+    if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) || !mode.dmPelsWidth || !mode.dmPelsHeight) {
+        return false;
     }
-    SetWindowLongPtrW(window, GWL_STYLE, popupStyle);
-    const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
-    SetWindowLongPtrW(window, GWL_EXSTYLE,
-        exStyle & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE));
-    SetWindowPos(window, HWND_TOP, 0, 0, static_cast<int>(width), static_cast<int>(height),
-                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
-    tmoxr::log::Info("Made the TrackMania window borderless and screen-sized: " + std::to_string(width) + "x" +
-        std::to_string(height) + " (was " + std::to_string(rect.right - rect.left) + "x" +
-        std::to_string(rect.bottom - rect.top) + ").");
+    width = mode.dmPelsWidth;
+    height = mode.dmPelsHeight;
+    refresh = mode.dmDisplayFrequency > 1 ? mode.dmDisplayFrequency : 0;
+    return true;
 }
 
-void FitPresentationToScreen(D3DPRESENT_PARAMETERS& parameters, HWND fallbackWindow) {
+void FitPresentationToScreen(D3DPRESENT_PARAMETERS& parameters, HWND) {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
     UINT width = 0;
     UINT height = 0;
-    if (!ScreenSize(width, height)) return;
-    parameters.Windowed = TRUE;
-    parameters.FullScreen_RefreshRateInHz = 0;
+    UINT refresh = 0;
+    if (!ScreenMode(width, height, refresh)) return;
+    const bool changed = parameters.Windowed || parameters.BackBufferWidth != width ||
+                         parameters.BackBufferHeight != height;
+    parameters.Windowed = FALSE;
     parameters.BackBufferWidth = width;
     parameters.BackBufferHeight = height;
-    CoverScreenWithWindow(parameters.hDeviceWindow ? parameters.hDeviceWindow : fallbackWindow);
+    parameters.FullScreen_RefreshRateInHz = refresh;
+    if (parameters.BackBufferFormat == D3DFMT_UNKNOWN) parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
+    if (changed) {
+        tmoxr::log::Info("Using fullscreen at the WinlatorXR screen size: " + std::to_string(width) + "x" +
+            std::to_string(height) + " at " + std::to_string(refresh) + " Hz.");
+    }
 }
 
 void RequestAlphaBackBuffer(D3DPRESENT_PARAMETERS& parameters) {
@@ -4225,9 +4217,6 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
         g_stereo.packedEyesActive ? g_stereo.renderWidth : 0);
     tmoxr::VrBridge::Instance().SetUiSurface(g_stereo.uiDrawsThisFrame ? g_stereo.uiSurface : nullptr,
         g_stereo.uiDrawsThisFrame ? g_stereo.uiSharedHandle : nullptr);
-    if (tmoxr::VrBridge::UsesGameWindowAsDisplay() && g_stereo.presentedFrames % 120 == 0) {
-        CoverScreenWithWindow(cursorWindow);
-    }
     ComposeWindowPresentation(device);
     tmoxr::VrBridge::Instance().OnBeforePresent(device);
     ++g_stereo.presentedFrames;
