@@ -312,7 +312,9 @@ struct VrBridge::Impl {
     bool verticalScaleLoaded = false;
     bool verticalScaleAdjusting = false;
     ULONGLONG lastScaleTick = 0;
-    bool windowStereo = false;  // start flat: the game opens in its menus
+    // Menus are shown on a curved screen inside the VR image, so WinlatorXR
+    // always stays in VR; this only switches the left stick to menu keys.
+    bool menuActive = true;  // the game opens in its menus
 
     TrackingSample latest{};
     bool haveLatest = false;
@@ -440,7 +442,7 @@ struct VrBridge::Impl {
                 const auto end = std::to_chars(text, text + sizeof(text), degrees, std::chars_format::fixed, 2).ptr;
                 return std::string(text, end);
             };
-            message = std::string(windowStereo ? "0 0 1 1 " : "0 0 2 0 ") + format(HorizontalFovDegrees()) + " " +
+            message = "0 0 1 1 " + format(HorizontalFovDegrees()) + " " +
                 format(squareFovDegrees);
         }
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
@@ -475,7 +477,7 @@ struct VrBridge::Impl {
                 // In menus the left stick navigates with the arrow keys, so
                 // the joypad reports it centred.
                 ControllerState published = latest.controller;
-                if (!windowStereo) published.leftStick[0] = published.leftStick[1] = 0.0f;
+                if (menuActive) published.leftStick[0] = published.leftStick[1] = 0.0f;
                 PublishControllerState(published);
                 ++receivedSamples;
                 received = true;
@@ -671,11 +673,11 @@ struct VrBridge::Impl {
     void BeginFrame() {
         if (!initialized || frameLatched) return;
         Drain();
-        if (windowStereo) WaitForNewSync();
+        WaitForNewSync();
         if (GetTickCount64() - lastModeSend >= kModeResendMilliseconds) SendMode(true);
         // Release held keys when WinlatorXR stops streaming (paused, closed).
         if (haveLatest && GetTickCount64() - lastSampleTick < kInputTimeoutMilliseconds) {
-            keyMapper.Update(latest.controller, !windowStereo);
+            keyMapper.Update(latest.controller, menuActive);
         } else {
             keyMapper.ReleaseAll();
             PublishControllerState({});
@@ -692,7 +694,7 @@ struct VrBridge::Impl {
     void EndFrame() {
         if (!initialized) return;
         if (presentedFrames == 300) LogWindowLayout();
-        if (frameLatched && windowStereo) {
+        if (frameLatched) {
             Drain();
             constexpr int kSyncSlots = 22;
             const int age = ((latest.sync - frameSync) / 12 % kSyncSlots + kSyncSlots) % kSyncSlots;
@@ -743,11 +745,10 @@ bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
 void VrBridge::SetWindowStereo(bool stereo) {
     if (!impl_) return;
     std::scoped_lock lock(impl_->mutex);
-    if (impl_->windowStereo == stereo) return;
-    impl_->windowStereo = stereo;
-    log::Info(stereo ? "XrAPI: race detected; switching WinlatorXR to side-by-side VR."
-                     : "XrAPI: menu; switching WinlatorXR to its flat virtual screen.");
-    if (impl_->initialized) impl_->SendMode(true);
+    if (impl_->menuActive == !stereo) return;
+    impl_->menuActive = !stereo;
+    log::Info(stereo ? "XrAPI: race detected; showing the game in stereo 3D."
+                     : "XrAPI: menu; showing the game on a curved screen in VR.");
 }
 
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {
