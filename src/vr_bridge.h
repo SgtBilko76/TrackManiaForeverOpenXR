@@ -41,8 +41,8 @@ public:
     // window may be fullscreen or larger than the desktop work area.
     static bool UsesGameWindowAsDisplay();
     bool GetWindowPresentation(WindowPresentation& presentation);
-    // Window-display backends only: true shows the side-by-side frame in VR,
-    // false shows the game window flat on a virtual screen (menus).
+    // Window-display backends only: true renders the game in stereo 3D,
+    // false shows it on a curved virtual screen inside VR (menus).
     void SetWindowStereo(bool stereo);
     void OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters);
     bool TryInitialize();

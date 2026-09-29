@@ -2387,7 +2387,10 @@ void ReleasePrivateEyeTargets() {
     }
 }
 
+void ReleaseCurvedScreen();
+
 void ReleaseStereoResources() {
+    ReleaseCurvedScreen();
     tmoxr::VrBridge::Instance().SetUiSurface(nullptr);
     ReleasePrivateEyeTargets();
     for (auto** resource : {&g_stereo.leftColor, &g_stereo.leftDepth, &g_stereo.uiSurface}) {
@@ -3398,6 +3401,187 @@ Vector3f RotateByQuaternion(const float q[4], const Vector3f& v) {
         v.z + q[3] * twiceCross.z + q[0] * twiceCross.y - q[1] * twiceCross.x};
 }
 
+// Projects tracking-space points (+X right, +Y up, -Z forward from the
+// recentered origin) into one eye's half of the side-by-side window, using
+// the same eye placement as the stereo scene cameras.
+struct EyeProjector {
+    Vector3f eyePosition{};
+    float inverseOrientation[4]{0.0f, 0.0f, 0.0f, 1.0f};
+    float tangentLeft = -1.0f;
+    float tangentRight = 1.0f;
+    float tangentDown = -1.0f;
+    float tangentUp = 1.0f;
+    float left = 0.0f;
+    float width = 1.0f;
+    float height = 1.0f;
+
+    // Pretransformed vertices with rhw = 1/depth keep texturing
+    // perspective-correct. Fails for points behind or too close to the eye.
+    bool Project(const Vector3f& point, float u, float v, PanelVertex& out) const {
+        const Vector3f view = RotateByQuaternion(inverseOrientation, {
+            point.x - eyePosition.x, point.y - eyePosition.y, point.z - eyePosition.z});
+        const float depth = -view.z;
+        if (depth < kWindowUiNearestDepthMeters) return false;
+        const float tangentX = view.x / depth;
+        const float tangentY = view.y / depth;
+        out = {left + width * (tangentX - tangentLeft) / (tangentRight - tangentLeft) - 0.5f,
+               height * (tangentUp - tangentY) / (tangentUp - tangentDown) - 0.5f,
+               0.0f, 1.0f / depth, u, v};
+        return true;
+    }
+};
+
+EyeProjector MakeEyeProjector(size_t eyeIndex, const D3DSURFACE_DESC& target) {
+    EyeProjector projector;
+    const float identity[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    const float* orientation = g_stereo.haveHeadPose ? g_stereo.headPose.orientation : identity;
+    for (size_t i = 0; i < 3; ++i) projector.inverseOrientation[i] = -orientation[i];
+    projector.inverseOrientation[3] = orientation[3];
+    if (g_stereo.haveHeadPose) {
+        projector.eyePosition = {g_stereo.headPose.position[0], g_stereo.headPose.position[1],
+                                 g_stereo.headPose.position[2]};
+    }
+    // Left eye at the tracked head, right eye one IPD to its right.
+    if (eyeIndex == 1) {
+        const Vector3f offset = RotateByQuaternion(orientation, {-RightEyeOffsetMeters(), 0.0f, 0.0f});
+        projector.eyePosition = {projector.eyePosition.x + offset.x, projector.eyePosition.y + offset.y,
+                                 projector.eyePosition.z + offset.z};
+    }
+    const auto& eye = g_stereo.renderConfiguration.eyes[eyeIndex];
+    projector.tangentLeft = std::tan(eye.angleLeft);
+    projector.tangentRight = std::tan(eye.angleRight);
+    projector.tangentDown = std::tan(eye.angleDown);
+    projector.tangentUp = std::tan(eye.angleUp);
+    projector.width = static_cast<float>(target.Width / 2);
+    projector.height = static_cast<float>(target.Height);
+    projector.left = projector.width * static_cast<float>(eyeIndex);
+    return projector;
+}
+
+// Menus are shown on a curved screen inside VR: a cylinder segment around the
+// recentered seat position, 100 degrees wide, its height following the game's
+// aspect ratio.
+constexpr float kCurvedScreenRadiusMeters = 1.6f;
+constexpr float kCurvedScreenArcDegrees = 100.0f;
+constexpr int kCurvedScreenSegments = 48;
+IDirect3DTexture9* g_curvedScreenTexture = nullptr;
+IDirect3DSurface9* g_curvedScreenSurface = nullptr;
+
+void ReleaseCurvedScreen() {
+    if (g_curvedScreenSurface) g_curvedScreenSurface->Release();
+    if (g_curvedScreenTexture) g_curvedScreenTexture->Release();
+    g_curvedScreenSurface = nullptr;
+    g_curvedScreenTexture = nullptr;
+}
+
+bool EnsureCurvedScreen(IDirect3DDevice9* device, const D3DSURFACE_DESC& target) {
+    if (g_curvedScreenSurface) {
+        D3DSURFACE_DESC existing{};
+        if (SUCCEEDED(g_curvedScreenSurface->GetDesc(&existing)) && existing.Width == target.Width &&
+            existing.Height == target.Height && existing.Format == target.Format) return true;
+        ReleaseCurvedScreen();
+    }
+    if (FAILED(device->CreateTexture(target.Width, target.Height, 1, D3DUSAGE_RENDERTARGET, target.Format,
+                                     D3DPOOL_DEFAULT, &g_curvedScreenTexture, nullptr)) ||
+        FAILED(g_curvedScreenTexture->GetSurfaceLevel(0, &g_curvedScreenSurface))) {
+        ReleaseCurvedScreen();
+        tmoxr::log::Warn("Could not allocate the curved menu screen texture.");
+        return false;
+    }
+    tmoxr::log::Info("Allocated the curved menu screen: " + std::to_string(target.Width) + "x" +
+        std::to_string(target.Height) + ".");
+    return true;
+}
+
+// Replaces the window contents with both eyes' view of the game frame on the
+// curved screen. The backbuffer holds the unmodified (mono) menu frame.
+void DrawCurvedScreen(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, const D3DSURFACE_DESC& target) {
+    if (!EnsureCurvedScreen(device, target) ||
+        FAILED(device->StretchRect(backBuffer, nullptr, g_curvedScreenSurface, nullptr, D3DTEXF_NONE))) return;
+
+    const float arc = kCurvedScreenArcDegrees * 3.14159265f / 180.0f;
+    const float halfHeight = 0.5f * kCurvedScreenRadiusMeters * arc *
+        static_cast<float>(target.Height) / static_cast<float>(target.Width);
+    std::array<std::vector<PanelVertex>, 2> vertices;
+    for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
+        const EyeProjector projector = MakeEyeProjector(eyeIndex, target);
+        for (int segment = 0; segment < kCurvedScreenSegments; ++segment) {
+            std::array<PanelVertex, 4> quad{};
+            bool visible = true;
+            for (int corner = 0; corner < 4 && visible; ++corner) {
+                const float u = static_cast<float>(segment + (corner & 1)) / kCurvedScreenSegments;
+                const float v = corner < 2 ? 0.0f : 1.0f;
+                const float angle = (u - 0.5f) * arc;
+                const Vector3f point{kCurvedScreenRadiusMeters * std::sin(angle), v < 0.5f ? halfHeight : -halfHeight,
+                                     -kCurvedScreenRadiusMeters * std::cos(angle)};
+                visible = projector.Project(point, u, v, quad[corner]);
+            }
+            if (!visible) continue;
+            vertices[eyeIndex].insert(vertices[eyeIndex].end(), {quad[0], quad[1], quad[2], quad[2], quad[1], quad[3]});
+        }
+    }
+
+    IDirect3DStateBlock9* state = nullptr;
+    if (FAILED(device->CreateStateBlock(D3DSBT_ALL, &state))) return;
+    const bool beginTemporaryScene = !g_stereo.sceneActive;
+    if (beginTemporaryScene && FAILED(g_originalBeginScene(device))) {
+        state->Release();
+        return;
+    }
+    g_renderingSettingsOverlay = true;
+    g_originalSetDepthStencilSurface(device, nullptr);
+    if (SUCCEEDED(g_originalSetRenderTarget(device, 0, backBuffer))) {
+        const D3DVIEWPORT9 viewport{0, 0, target.Width, target.Height, 0.0f, 1.0f};
+        g_originalSetViewport(device, &viewport);
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+        g_originalClear(device, 0, nullptr, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0);
+        g_originalSetVertexShader(device, nullptr);
+        device->SetPixelShader(nullptr);
+        device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+        device->SetTexture(0, g_curvedScreenTexture);
+        device->SetRenderState(D3DRS_ZENABLE, FALSE);
+        device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+        device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+        device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+        device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+        device->SetRenderState(D3DRS_LIGHTING, FALSE);
+        device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+        device->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED |
+            D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE | D3DCOLORWRITEENABLE_ALPHA);
+        device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+        device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+        device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+        device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+        device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+        device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
+        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+        // Each eye is clipped to its half of the window.
+        device->SetRenderState(D3DRS_SCISSORTESTENABLE, TRUE);
+        for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
+            if (vertices[eyeIndex].empty()) continue;
+            const LONG left = static_cast<LONG>(eyeIndex * (target.Width / 2));
+            const RECT scissor{left, 0, left + static_cast<LONG>(target.Width / 2), static_cast<LONG>(target.Height)};
+            device->SetScissorRect(&scissor);
+            g_originalDrawPrimitiveUP(device, D3DPT_TRIANGLELIST, static_cast<UINT>(vertices[eyeIndex].size() / 3),
+                                      vertices[eyeIndex].data(), sizeof(PanelVertex));
+        }
+    }
+    g_renderingSettingsOverlay = false;
+    if (beginTemporaryScene) g_originalEndScene(device);
+    state->Apply();
+    state->Release();
+    g_originalSetDepthStencilSurface(device, nullptr);
+    g_originalSetRenderTarget(device, 0, g_stereo.activeColor);
+    g_originalSetDepthStencilSurface(device, g_stereo.activeDepth);
+    if (g_stereo.haveGameViewport) g_originalSetViewport(device, &g_stereo.gameViewport);
+}
+
 void DrawWindowPresentationUi(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer,
                               const D3DSURFACE_DESC& target) {
     // Tracking space: +X right, +Y up, -Z forward from the recentered origin.
@@ -3558,8 +3742,10 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
         return;
     }
     const RECT syncPixel{0, 0, 2, 2};
-    // Flat (menu) frames and frames without a finished eye pair keep the game
-    // image but still carry the sync pixel.
+    // Menus: the unmodified game frame goes onto the curved screen in VR.
+    if (WindowFlat() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
+    // Frames without a finished eye pair keep their image but still carry
+    // the sync pixel.
     if (WindowFlat() || !g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||
         !g_stereo.packedEyesActive) {
         device->ColorFill(backBuffer, &syncPixel, presentation.syncColor);

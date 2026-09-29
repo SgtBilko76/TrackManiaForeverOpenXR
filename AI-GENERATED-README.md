@@ -124,7 +124,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.6 m wide and 1.0 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
-- Menus are shown flat: while TrackMania only uses its narrow menu camera (vertical projection scale above 3, about 30 degrees), the mod renders the game unmodified and switches WinlatorXR to its virtual screen (`MODE_VR 2`). WinlatorXR's "Use curved screen" option in its XR dialog curves that screen. After 5 frames with a wide (race) camera it switches to side-by-side VR, and back after 30 frames without one.
+- WinlatorXR always stays in VR. Menus are rendered unmodified and shown on a curved screen inside the VR image: a 100° cylinder segment 1.6 m around the recentered seat position, drawn into both eyes with head tracking. Races (40 or more 3D draws per frame, for five frames) are rendered in stereo 3D; 30 frames with only a few 3D draws switch back to the menu screen, and frames without 3D keep the current mode.
 - The Quest controllers appear in TrackMania as a DirectInput game controller named **Quest Controllers**. Bind it once under Profile → Controls:
 
   | Quest controller | Joypad input |
