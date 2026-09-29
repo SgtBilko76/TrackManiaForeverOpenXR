@@ -597,16 +597,16 @@ struct VrBridge::Impl {
         log::Info("XrAPI: headset FOV " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) + " degrees.");
     }
 
-    // Warns when the eye image does not have the FOV's aspect ratio, because
-    // WinlatorXR then shows it stretched (square pixels).
-    void CheckEyeAspect() const {
-        const float ideal = std::tan(fovXDegrees * kPi / 360.0f) / std::tan(fovYDegrees * kPi / 360.0f);
-        const float actual = static_cast<float>(eyeWidth) / static_cast<float>(eyeHeight);
-        if (std::abs(actual / ideal - 1.0f) < 0.02f) return;
-        const UINT idealWidth = static_cast<UINT>(std::lround(eyeHeight * ideal / 2.0f)) * 2u;
-        log::Warn("XrAPI: the eye image aspect " + std::to_string(actual) + " does not match the headset FOV (" +
-            std::to_string(ideal) + "); the view will look squeezed. Set the WinlatorXR screen size to " +
-            std::to_string(idealWidth * 2u) + "x" + std::to_string(eyeHeight) + ".");
+    // WinlatorXR shows each eye image with square pixels. The vertical angle
+    // is the headset's; the horizontal one follows the eye image's aspect
+    // ratio, which equals the headset's horizontal angle only for a screen of
+    // about 2.21:1 (for example 3584x1624, which the installed WinlatorXR
+    // cannot display). Narrower eyes lose some horizontal FOV but keep their
+    // proportions.
+    float RenderedHorizontalFovDegrees() const {
+        if (!eyeWidth || !eyeHeight || fovYDegrees <= 1.0f) return fovXDegrees;
+        const float halfVertical = fovYDegrees * kPi / 360.0f;
+        return 2.0f * std::atan(std::tan(halfVertical) * eyeWidth / eyeHeight) * 180.0f / kPi;
     }
 
     static std::filesystem::path VerticalScalePath() { return ModuleFilePath(L"TMFOXR-xrapi.txt"); }
@@ -653,13 +653,10 @@ struct VrBridge::Impl {
 
     void UpdateRenderConfiguration(const TrackingSample& sample) {
         LoadVerticalScale();
-        const UINT previousEyeWidth = eyeWidth;
-        const UINT previousEyeHeight = eyeHeight;
         UpdateEyeSize();
         CaptureFov(sample);
         if (!eyeWidth || !eyeHeight || fovXDegrees <= 1.0f) return;
-        if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) CheckEyeAspect();
-        const float halfX = std::atan(std::tan(fovXDegrees * kPi / 360.0f) / horizontalScale);
+        const float halfX = std::atan(std::tan(RenderedHorizontalFovDegrees() * kPi / 360.0f) / horizontalScale);
         const float halfY = std::atan(std::tan(fovYDegrees * kPi / 360.0f) / verticalScale);
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
@@ -677,8 +674,9 @@ struct VrBridge::Impl {
         haveRenderConfiguration = true;
         if (onlyScaleChanged) return;
         log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
-            " per eye with the headset FOV " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) +
-            " degrees, IPD " + std::to_string(sample.ipd) + " m.");
+            " per eye with a " + std::to_string(RenderedHorizontalFovDegrees()) + "x" + std::to_string(fovYDegrees) +
+            " degree FOV (square pixels; headset " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) +
+            "), IPD " + std::to_string(sample.ipd) + " m.");
     }
 
     void BeginFrame() {
