@@ -581,17 +581,20 @@ struct VrBridge::Impl {
     // the renderer (0 as tracked, 1 mirrored, 2 removed), re-read every second.
     int rollMode = 0;
 
-    // Diagnostic like the Halo mod: TMFOXR-fov.txt beside the DLL holds a FOV
-    // in degrees that is requested from WinlatorXR for both axes and rendered
-    // exactly (re-read every second). Without the file the headset FOV is used.
-    float requestedFovDegrees = 0.0f;
+    // Like the Halo mod (HWXR), the mod requests a square FOV from WinlatorXR
+    // and renders exactly that. With the headset's reported (non-square) FOV
+    // the view squeezed whenever the head was tilted sideways, whatever the
+    // rendering did; with a square request it does not. TMFOXR-fov.txt beside
+    // the DLL overrides the angle (0 = headset FOV), re-read every second.
+    static constexpr float kDefaultSquareFovDegrees = 104.5f;
+    float requestedFovDegrees = kDefaultSquareFovDegrees;
     ULONGLONG lastFovCheck = 0;
     void ReloadRequestedFov() {
         if (GetTickCount64() - lastFovCheck < 1000) return;
         lastFovCheck = GetTickCount64();
-        float value = 0.0f;
+        float value = kDefaultSquareFovDegrees;
         std::ifstream file(ModuleFilePath(L"TMFOXR-fov.txt"));
-        if (!(file >> value) || value < 60.0f || value > 140.0f) value = 0.0f;
+        if (file >> value && value != 0.0f && (value < 60.0f || value > 140.0f)) value = kDefaultSquareFovDegrees;
         if (value == requestedFovDegrees) return;
         requestedFovDegrees = value;
         log::Info(value > 0.0f ? "XrAPI: requesting and rendering a square " + std::to_string(value) + " degree FOV."
@@ -755,10 +758,9 @@ struct VrBridge::Impl {
         ++renderConfiguration.sample;
         haveRenderConfiguration = true;
         if (onlyScaleChanged) return;
-        log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
-            " per eye with a " + std::to_string(RenderedHorizontalFovDegrees()) + "x" + std::to_string(fovYDegrees) +
-            " degree FOV (square pixels; headset " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) +
-            "), IPD " + std::to_string(sample.ipd) + " m.");
+        log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) + " per eye with a " +
+            std::to_string(halfX * 360.0f / kPi) + "x" + std::to_string(halfY * 360.0f / kPi) + " degree FOV" +
+            (square ? " (square request, like the Halo mod)" : " (headset FOV)") + ", IPD " + std::to_string(sample.ipd) + " m.");
     }
 
     void BeginFrame() {
