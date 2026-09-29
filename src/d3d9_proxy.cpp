@@ -682,43 +682,120 @@ WindowFitResult EvaluateWindowFit(HWND window, const D3DPRESENT_PARAMETERS& para
 // WinlatorXR only accepts the frame-sync pixel when its alpha is non-zero.
 // An X8R8G8B8 backbuffer leaves alpha undefined (DXVK may present 0), so the
 // window-display build asks for a real alpha channel.
-// WinlatorXR splits the whole X screen into the two eye halves. TrackMania
-// kept its framed 1920x1080 window while rendering a screen-sized backbuffer,
-// so Present scaled the side-by-side frame into part of the screen: the eyes
-// were squeezed (about 0.8), overlapped and the sync marker was not where
-// WinlatorXR reads it. Resizing the window ourselves raced with TrackMania,
-// which resizes it back on every reset, and crashed WinlatorXR while it read
-// the sync marker. The game is therefore switched to real fullscreen at the
-// screen resolution, where Wine sizes the window once, as when it ran stably.
-bool ScreenMode(UINT& width, UINT& height, UINT& refresh) {
-    DEVMODEW mode{};
-    mode.dmSize = sizeof(mode);
-    if (!EnumDisplaySettingsW(nullptr, ENUM_CURRENT_SETTINGS, &mode) || !mode.dmPelsWidth || !mode.dmPelsHeight) {
-        return false;
-    }
-    width = mode.dmPelsWidth;
-    height = mode.dmPelsHeight;
-    refresh = mode.dmDisplayFrequency > 1 ? mode.dmDisplayFrequency : 0;
-    return true;
-}
-
+// WinlatorXR splits the whole X screen into the two eye halves, so the
+// backbuffer must match the screen exactly; the window itself is kept
+// borderless and screen-sized by the window hooks below.
 void FitPresentationToScreen(D3DPRESENT_PARAMETERS& parameters, HWND) {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
-    UINT width = 0;
-    UINT height = 0;
-    UINT refresh = 0;
-    if (!ScreenMode(width, height, refresh)) return;
-    const bool changed = parameters.Windowed || parameters.BackBufferWidth != width ||
-                         parameters.BackBufferHeight != height;
-    parameters.Windowed = FALSE;
-    parameters.BackBufferWidth = width;
-    parameters.BackBufferHeight = height;
-    parameters.FullScreen_RefreshRateInHz = refresh;
-    if (parameters.BackBufferFormat == D3DFMT_UNKNOWN) parameters.BackBufferFormat = D3DFMT_A8R8G8B8;
-    if (changed) {
-        tmoxr::log::Info("Using fullscreen at the WinlatorXR screen size: " + std::to_string(width) + "x" +
-            std::to_string(height) + " at " + std::to_string(refresh) + " Hz.");
+    const int width = GetSystemMetrics(SM_CXSCREEN);
+    const int height = GetSystemMetrics(SM_CYSCREEN);
+    if (width <= 0 || height <= 0) return;
+    parameters.Windowed = TRUE;
+    parameters.FullScreen_RefreshRateInHz = 0;
+    parameters.BackBufferWidth = static_cast<UINT>(width);
+    parameters.BackBufferHeight = static_cast<UINT>(height);
+}
+
+// TrackMania sizes its window from its own resolution setting (a framed
+// 1920x1080 window), which WinlatorXR then shows scaled inside a larger
+// screen. Its window calls are redirected so the main window is always
+// borderless at the origin with the screen size: TrackMania itself then
+// creates the right window, and nothing resizes it afterwards.
+using CreateWindowExWFn = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
+using SetWindowPosFn = BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT);
+using SetWindowLongWFn = LONG(WINAPI*)(HWND, int, LONG);
+CreateWindowExWFn g_originalCreateWindowExW = nullptr;
+SetWindowPosFn g_originalSetWindowPos = nullptr;
+SetWindowLongWFn g_originalSetWindowLongW = nullptr;
+HWND g_screenWindow = nullptr;
+constexpr DWORD kFrameStyles = WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_BORDER | WS_DLGFRAME;
+constexpr DWORD kFrameExStyles = WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE;
+
+bool ScreenSize(int& width, int& height) {
+    width = GetSystemMetrics(SM_CXSCREEN);
+    height = GetSystemMetrics(SM_CYSCREEN);
+    return width > 0 && height > 0;
+}
+
+HWND WINAPI CreateWindowExWHook(DWORD exStyle, LPCWSTR className, LPCWSTR title, DWORD style, int x, int y,
+                                int width, int height, HWND parent, HMENU menu, HINSTANCE instance, LPVOID parameter) {
+    int screenWidth = 0;
+    int screenHeight = 0;
+    const bool gameWindow = !parent && className && !IS_INTRESOURCE(className) &&
+                            _wcsicmp(className, L"TmForever") == 0 && ScreenSize(screenWidth, screenHeight);
+    if (!gameWindow) {
+        return g_originalCreateWindowExW(exStyle, className, title, style, x, y, width, height, parent, menu, instance, parameter);
     }
+    const HWND window = g_originalCreateWindowExW(exStyle & ~kFrameExStyles, className, title,
+        (style & ~kFrameStyles) | WS_POPUP, 0, 0, screenWidth, screenHeight, parent, menu, instance, parameter);
+    g_screenWindow = window;
+    tmoxr::log::Info("Created the TrackMania window borderless at the screen size " + std::to_string(screenWidth) +
+        "x" + std::to_string(screenHeight) + " (requested " + std::to_string(width) + "x" + std::to_string(height) + ").");
+    return window;
+}
+
+BOOL WINAPI SetWindowPosHook(HWND window, HWND after, int x, int y, int width, int height, UINT flags) {
+    int screenWidth = 0;
+    int screenHeight = 0;
+    if (window && window == g_screenWindow && ScreenSize(screenWidth, screenHeight)) {
+        if (!(flags & SWP_NOMOVE)) x = y = 0;
+        if (!(flags & SWP_NOSIZE)) {
+            width = screenWidth;
+            height = screenHeight;
+        }
+    }
+    return g_originalSetWindowPos(window, after, x, y, width, height, flags);
+}
+
+LONG WINAPI SetWindowLongWHook(HWND window, int index, LONG value) {
+    if (window && window == g_screenWindow) {
+        if (index == GWL_STYLE) value = static_cast<LONG>((static_cast<DWORD>(value) & ~kFrameStyles) | WS_POPUP);
+        if (index == GWL_EXSTYLE) value = static_cast<LONG>(static_cast<DWORD>(value) & ~kFrameExStyles);
+    }
+    return g_originalSetWindowLongW(window, index, value);
+}
+
+void InstallScreenWindowHooks() {
+    auto* const module = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(module);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(module + dos->e_lfanew);
+    const auto& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || nt->Signature != IMAGE_NT_SIGNATURE || !directory.VirtualAddress) return;
+    int patched = 0;
+    for (auto* descriptor = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(module + directory.VirtualAddress);
+         descriptor->Name; ++descriptor) {
+        if (_stricmp(reinterpret_cast<const char*>(module + descriptor->Name), "user32.dll") != 0) continue;
+        auto* names = reinterpret_cast<IMAGE_THUNK_DATA32*>(
+            module + (descriptor->OriginalFirstThunk ? descriptor->OriginalFirstThunk : descriptor->FirstThunk));
+        auto* functions = reinterpret_cast<IMAGE_THUNK_DATA32*>(module + descriptor->FirstThunk);
+        for (; names->u1.AddressOfData; ++names, ++functions) {
+            if (IMAGE_SNAP_BY_ORDINAL32(names->u1.Ordinal)) continue;
+            const char* name = reinterpret_cast<const char*>(
+                reinterpret_cast<const IMAGE_IMPORT_BY_NAME*>(module + names->u1.AddressOfData)->Name);
+            void* replacement = nullptr;
+            void** original = nullptr;
+            if (std::strcmp(name, "CreateWindowExW") == 0) {
+                replacement = reinterpret_cast<void*>(&CreateWindowExWHook);
+                original = reinterpret_cast<void**>(&g_originalCreateWindowExW);
+            } else if (std::strcmp(name, "SetWindowPos") == 0) {
+                replacement = reinterpret_cast<void*>(&SetWindowPosHook);
+                original = reinterpret_cast<void**>(&g_originalSetWindowPos);
+            } else if (std::strcmp(name, "SetWindowLongW") == 0) {
+                replacement = reinterpret_cast<void*>(&SetWindowLongWHook);
+                original = reinterpret_cast<void**>(&g_originalSetWindowLongW);
+            } else {
+                continue;
+            }
+            DWORD protection = 0;
+            if (!VirtualProtect(&functions->u1.Function, sizeof(DWORD), PAGE_READWRITE, &protection)) continue;
+            *original = reinterpret_cast<void*>(functions->u1.Function);
+            functions->u1.Function = static_cast<DWORD>(reinterpret_cast<uintptr_t>(replacement));
+            DWORD ignored = 0;
+            VirtualProtect(&functions->u1.Function, sizeof(DWORD), protection, &ignored);
+            ++patched;
+        }
+    }
+    tmoxr::log::Info("Redirected " + std::to_string(patched) + " of 3 TrackMania window functions to keep its window screen-sized.");
 }
 
 void RequestAlphaBackBuffer(D3DPRESENT_PARAMETERS& parameters) {
@@ -5541,6 +5618,7 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
 #ifdef TMFOXR_VIRTUAL_JOYPAD
         if (IsTrackManiaGameProcess()) tmoxr::InstallVirtualJoypad();
 #endif
+        if (IsTrackManiaGameProcess() && tmoxr::VrBridge::UsesGameWindowAsDisplay()) InstallScreenWindowHooks();
         if (IsTrackManiaGameProcess() && tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
             AddVectoredExceptionHandler(0, &LogAccessViolation);
         }
