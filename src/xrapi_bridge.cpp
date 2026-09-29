@@ -304,9 +304,12 @@ struct VrBridge::Impl {
     // 3584x1624 screen (1792x1624 per eye).
     float fovXDegrees = 0.0f;
     float fovYDegrees = 0.0f;
-    // Vertical image scale tuned in the headset (both grips + right stick),
-    // saved in TMFOXR-xrapi.txt beside the DLL. Above 1 the image gets taller.
+    // Image scales tuned in the headset (both grips + right stick up/down for
+    // vertical, left/right for horizontal), saved in TMFOXR-xrapi.txt beside
+    // the DLL. WinlatorXR's display does not show the eye image with exactly
+    // the FOV it reports; above 1 the image gets taller or wider.
     float verticalScale = 1.0f;
+    float horizontalScale = 1.0f;
     bool verticalScaleLoaded = false;
     bool verticalScaleAdjusting = false;
     ULONGLONG lastScaleTick = 0;
@@ -568,6 +571,25 @@ struct VrBridge::Impl {
         return {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
     }
 
+    // Diagnostic: while TMFOXR-synctest.txt exists beside the DLL, every frame
+    // claims sync value 0. If WinlatorXR honours the sync pixel, the view then
+    // stutters badly on head movement; if nothing changes, it ignores it.
+    bool fixedSyncTest = false;
+    ULONGLONG lastSyncTestCheck = 0;
+    bool FixedSyncTest() {
+        const ULONGLONG now = GetTickCount64();
+        if (now - lastSyncTestCheck >= 1000) {
+            lastSyncTestCheck = now;
+            const bool enabled = GetFileAttributesW(ModuleFilePath(L"TMFOXR-synctest.txt").c_str()) !=
+                                 INVALID_FILE_ATTRIBUTES;
+            if (enabled != fixedSyncTest) {
+                log::Info(enabled ? "XrAPI: sync test on (every frame claims sync 0)." : "XrAPI: sync test off.");
+            }
+            fixedSyncTest = enabled;
+        }
+        return fixedSyncTest;
+    }
+
     void CaptureFov(const TrackingSample& sample) {
         if (fovXDegrees > 1.0f || sample.fovXDegrees <= 1.0f || sample.fovYDegrees <= 1.0f) return;
         fovXDegrees = sample.fovXDegrees;
@@ -593,30 +615,39 @@ struct VrBridge::Impl {
         if (verticalScaleLoaded) return;
         verticalScaleLoaded = true;
         std::ifstream file(VerticalScalePath());
-        float value = 0.0f;
-        if (file >> value && value >= 0.5f && value <= 2.0f) verticalScale = value;
-        log::Info("XrAPI: vertical image scale " + std::to_string(verticalScale) +
-            " (hold both grips and move the right stick up/down to adjust).");
+        float vertical = 0.0f;
+        float horizontal = 0.0f;
+        if (file >> vertical && vertical >= 0.5f && vertical <= 2.0f) verticalScale = vertical;
+        if (file >> horizontal && horizontal >= 0.5f && horizontal <= 2.0f) horizontalScale = horizontal;
+        log::Info("XrAPI: image scale vertical " + std::to_string(verticalScale) + ", horizontal " +
+            std::to_string(horizontalScale) + " (hold both grips and move the right stick to adjust).");
     }
 
     // Both grips held: the right stick scales the image vertically, live.
     void AdjustVerticalScale(const ControllerState& state) {
         const bool held = state.Pressed(kLeftGrip) && state.Pressed(kRightGrip);
-        const float stick = state.rightStick[1];
+        const float stickX = state.rightStick[0];
+        const float stickY = state.rightStick[1];
         const ULONGLONG now = GetTickCount64();
         const float seconds = lastScaleTick ? std::min(0.1f, (now - lastScaleTick) / 1000.0f) : 0.0f;
         lastScaleTick = now;
-        if (held && std::abs(stick) > 0.3f) {
-            // About 10% per second at full deflection, independent of frame rate.
-            // Content appears taller when the rendered vertical angle shrinks.
-            verticalScale = std::clamp(verticalScale * std::pow(1.10f, stick * seconds), 0.5f, 2.0f);
+        if (held && (std::abs(stickX) > 0.3f || std::abs(stickY) > 0.3f)) {
+            // About 10% per second at full deflection, independent of frame
+            // rate, one axis at a time. Content appears larger when the
+            // rendered angle shrinks.
+            if (std::abs(stickY) >= std::abs(stickX)) {
+                verticalScale = std::clamp(verticalScale * std::pow(1.10f, stickY * seconds), 0.5f, 2.0f);
+            } else {
+                horizontalScale = std::clamp(horizontalScale * std::pow(1.10f, stickX * seconds), 0.5f, 2.0f);
+            }
             verticalScaleAdjusting = true;
             return;
         }
         if (!held && verticalScaleAdjusting) {
             verticalScaleAdjusting = false;
-            std::ofstream(VerticalScalePath()) << verticalScale << "\n";
-            log::Info("XrAPI: vertical image scale set to " + std::to_string(verticalScale) + " and saved.");
+            std::ofstream(VerticalScalePath()) << verticalScale << " " << horizontalScale << "\n";
+            log::Info("XrAPI: image scale set to vertical " + std::to_string(verticalScale) + ", horizontal " +
+                std::to_string(horizontalScale) + " and saved.");
         }
     }
 
@@ -628,7 +659,7 @@ struct VrBridge::Impl {
         CaptureFov(sample);
         if (!eyeWidth || !eyeHeight || fovXDegrees <= 1.0f) return;
         if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) CheckEyeAspect();
-        const float halfX = fovXDegrees * kPi / 360.0f;
+        const float halfX = std::atan(std::tan(fovXDegrees * kPi / 360.0f) / horizontalScale);
         const float halfY = std::atan(std::tan(fovYDegrees * kPi / 360.0f) / verticalScale);
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
@@ -718,7 +749,7 @@ bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
     // and a game-image pixel around a mode switch would corrupt it.
     if (!impl_->initialized || !impl_->frameLatched || impl_->frameSync < 0) return false;
     // Green must stay 0 and alpha non-zero; blue 0 selects the left/SBS target.
-    presentation.syncColor = D3DCOLOR_ARGB(255, impl_->frameSync, 0, 0);
+    presentation.syncColor = D3DCOLOR_ARGB(255, impl_->FixedSyncTest() ? 0 : impl_->frameSync, 0, 0);
     return true;
 }
 
