@@ -160,13 +160,6 @@ std::wstring ApiDirectory() {
     return kDefaultApiDirectory;
 }
 
-// TMFOXR_XRAPI_FOV overrides the square field of view in degrees.
-float SquareFovOverride() {
-    wchar_t value[16]{};
-    if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_FOV", value, 16)) return 0.0f;
-    return std::clamp(static_cast<float>(_wtof(value)), 60.0f, 140.0f);
-}
-
 DWORD SyncWaitMilliseconds() {
     wchar_t value[16]{};
     if (!GetEnvironmentVariableW(L"TMFOXR_XRAPI_SYNC_WAIT_MS", value, 16)) return kDefaultSyncWaitMilliseconds;
@@ -305,7 +298,12 @@ struct VrBridge::Impl {
     bool initialized = false;
     bool permanentlyDisabled = false;
     DWORD syncWaitMilliseconds = kDefaultSyncWaitMilliseconds;
-    float squareFovDegrees = 0.0f;
+    // The headset's own FOV as WinlatorXR reports it (horizontal x vertical).
+    // WinlatorXR displays each eye with this FOV and square pixels, so the
+    // eye image aspect must match tan(h/2)/tan(v/2); on a Quest 3 that is a
+    // 3584x1624 screen (1792x1624 per eye).
+    float fovXDegrees = 0.0f;
+    float fovYDegrees = 0.0f;
     // Vertical image scale tuned in the headset (both grips + right stick),
     // saved in TMFOXR-xrapi.txt beside the DLL. Above 1 the image gets taller.
     float verticalScale = 1.0f;
@@ -431,20 +429,9 @@ struct VrBridge::Impl {
 
     void SendMode(bool enabled) {
         if (socket == INVALID_SOCKET) return;
-        // L_HAPTICS R_HAPTICS MODE_VR MODE_3D FOVX FOVY. A FOV of 0 keeps the headset's own.
-        // std::to_chars is locale independent; WinlatorXR parses with Java's Float.
-        // MODE_VR 1 + MODE_3D 1: side-by-side VR. MODE_VR 2 + MODE_3D 0: the
-        // window on a flat virtual screen without head tracking.
-        std::string message = "0 0 0 0 0 0";
-        if (enabled) {
-            const auto format = [](float degrees) {
-                char text[32]{};
-                const auto end = std::to_chars(text, text + sizeof(text), degrees, std::chars_format::fixed, 2).ptr;
-                return std::string(text, end);
-            };
-            message = "0 0 1 1 " + format(HorizontalFovDegrees()) + " " +
-                format(squareFovDegrees);
-        }
+        // L_HAPTICS R_HAPTICS MODE_VR MODE_3D FOVX FOVY: side-by-side VR with
+        // the headset's natural FOV (0 = no custom FOV), or everything off.
+        const std::string message = enabled ? "0 0 1 1 0 0" : "0 0 0 0 0 0";
         sendto(socket, message.c_str(), static_cast<int>(message.size()), 0,
                reinterpret_cast<const sockaddr*>(&modeTarget), sizeof(modeTarget));
         lastModeSend = GetTickCount64();
@@ -581,29 +568,23 @@ struct VrBridge::Impl {
         return {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
     }
 
-    // WinlatorXR's reported FOV and the FOV of its projection layer disagree on
-    // which axis is which (the image appeared squeezed horizontally by ~0.8).
-    // Requesting the same angle for both axes, as the Halo mod does, removes
-    // the ambiguity; the larger reported angle keeps the whole view covered.
-    void ChooseSquareFov(const TrackingSample& sample) {
-        if (squareFovDegrees > 1.0f || sample.fovXDegrees <= 1.0f || sample.fovYDegrees <= 1.0f) return;
-        squareFovDegrees = SquareFovOverride();
-        if (squareFovDegrees <= 1.0f) squareFovDegrees = std::max(sample.fovXDegrees, sample.fovYDegrees);
-        log::Info("XrAPI: headset reported FOV " + std::to_string(sample.fovXDegrees) + "x" +
-            std::to_string(sample.fovYDegrees) + " degrees; requesting " + std::to_string(squareFovDegrees) +
-            "x" + std::to_string(squareFovDegrees) + ".");
-        SendMode(true);
+    void CaptureFov(const TrackingSample& sample) {
+        if (fovXDegrees > 1.0f || sample.fovXDegrees <= 1.0f || sample.fovYDegrees <= 1.0f) return;
+        fovXDegrees = sample.fovXDegrees;
+        fovYDegrees = sample.fovYDegrees;
+        log::Info("XrAPI: headset FOV " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) + " degrees.");
     }
 
-    // WinlatorXR shows each eye image with square pixels, so a non-square eye
-    // image (960x1080 from a 1920x1080 screen) appeared squeezed. The vertical
-    // angle is the chosen FOV; the horizontal one follows the eye image's
-    // aspect ratio. A 2:1 screen gives square eyes and equal angles.
-    float HorizontalFovDegrees() const {
-        if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return squareFovDegrees;
-        const float halfVertical = squareFovDegrees * kPi / 360.0f;
-        const float halfHorizontal = std::atan(std::tan(halfVertical) * eyeWidth / eyeHeight);
-        return halfHorizontal * 360.0f / kPi;
+    // Warns when the eye image does not have the FOV's aspect ratio, because
+    // WinlatorXR then shows it stretched (square pixels).
+    void CheckEyeAspect() const {
+        const float ideal = std::tan(fovXDegrees * kPi / 360.0f) / std::tan(fovYDegrees * kPi / 360.0f);
+        const float actual = static_cast<float>(eyeWidth) / static_cast<float>(eyeHeight);
+        if (std::abs(actual / ideal - 1.0f) < 0.02f) return;
+        const UINT idealWidth = static_cast<UINT>(std::lround(eyeHeight * ideal / 2.0f)) * 2u;
+        log::Warn("XrAPI: the eye image aspect " + std::to_string(actual) + " does not match the headset FOV (" +
+            std::to_string(ideal) + "); the view will look squeezed. Set the WinlatorXR screen size to " +
+            std::to_string(idealWidth * 2u) + "x" + std::to_string(eyeHeight) + ".");
     }
 
     static std::filesystem::path VerticalScalePath() { return ModuleFilePath(L"TMFOXR-xrapi.txt"); }
@@ -644,11 +625,11 @@ struct VrBridge::Impl {
         const UINT previousEyeWidth = eyeWidth;
         const UINT previousEyeHeight = eyeHeight;
         UpdateEyeSize();
-        ChooseSquareFov(sample);
-        if (!eyeWidth || !eyeHeight || squareFovDegrees <= 1.0f) return;
-        if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) SendMode(true);
-        const float halfX = HorizontalFovDegrees() * kPi / 360.0f;
-        const float halfY = std::atan(std::tan(squareFovDegrees * kPi / 360.0f) / verticalScale);
+        CaptureFov(sample);
+        if (!eyeWidth || !eyeHeight || fovXDegrees <= 1.0f) return;
+        if (eyeWidth != previousEyeWidth || eyeHeight != previousEyeHeight) CheckEyeAspect();
+        const float halfX = fovXDegrees * kPi / 360.0f;
+        const float halfY = std::atan(std::tan(fovYDegrees * kPi / 360.0f) / verticalScale);
         auto& eyes = renderConfiguration.eyes;
         if (haveRenderConfiguration && eyes[0].width == eyeWidth && eyes[0].height == eyeHeight &&
             eyes[0].angleRight == halfX && eyes[0].angleUp == halfY) return;
@@ -665,9 +646,8 @@ struct VrBridge::Impl {
         haveRenderConfiguration = true;
         if (onlyScaleChanged) return;
         log::Info("XrAPI: rendering " + std::to_string(eyeWidth) + "x" + std::to_string(eyeHeight) +
-            " per eye with a " + std::to_string(HorizontalFovDegrees()) + "x" + std::to_string(squareFovDegrees) +
-            " degree FOV (square pixels), IPD " + std::to_string(sample.ipd) + " m." +
-            (eyeWidth == eyeHeight ? "" : " A 2:1 WinlatorXR screen size gives square eyes and the full horizontal FOV."));
+            " per eye with the headset FOV " + std::to_string(fovXDegrees) + "x" + std::to_string(fovYDegrees) +
+            " degrees, IPD " + std::to_string(sample.ipd) + " m.");
     }
 
     void BeginFrame() {
