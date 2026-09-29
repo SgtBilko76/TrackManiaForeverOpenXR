@@ -5409,6 +5409,54 @@ extern "C" __declspec(dllexport) void CALLBACK TMFOXR_PatchAfterExit(
         MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
 }
 
+// Logs access violations with module-relative addresses and a frame-pointer
+// stack walk, so crashes on the headset (where no debugger output is
+// available) can be located. First-chance exceptions include ones the game
+// handles itself, so only the first few distinct addresses are logged.
+std::string DescribeCodeAddress(uintptr_t address) {
+    HMODULE module = nullptr;
+    char path[MAX_PATH]{};
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCSTR>(address), &module) && module &&
+        GetModuleFileNameA(module, path, MAX_PATH)) {
+        const char* name = std::strrchr(path, '\\');
+        std::ostringstream text;
+        text << (name ? name + 1 : path) << "+0x" << std::hex << (address - reinterpret_cast<uintptr_t>(module));
+        return text.str();
+    }
+    std::ostringstream text;
+    text << "0x" << std::hex << address;
+    return text.str();
+}
+
+LONG CALLBACK LogAccessViolation(EXCEPTION_POINTERS* info) {
+    if (!info || !info->ExceptionRecord || info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    static LONG logged = 0;
+    static uintptr_t seen[8]{};
+    const auto address = reinterpret_cast<uintptr_t>(info->ExceptionRecord->ExceptionAddress);
+    for (const uintptr_t previous : seen) {
+        if (previous == address) return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const LONG index = InterlockedIncrement(&logged) - 1;
+    if (index >= 8) return EXCEPTION_CONTINUE_SEARCH;
+    seen[index] = address;
+    std::ostringstream text;
+    text << "Access violation (" << (info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read")
+         << " of 0x" << std::hex << info->ExceptionRecord->ExceptionInformation[1] << ") at "
+         << DescribeCodeAddress(address) << "; stack:";
+    auto* frame = reinterpret_cast<uintptr_t*>(info->ContextRecord->Ebp);
+    for (int depth = 0; depth < 12 && frame && !IsBadReadPtr(frame, 2 * sizeof(uintptr_t)); ++depth) {
+        text << ' ' << DescribeCodeAddress(frame[1]);
+        auto* next = reinterpret_cast<uintptr_t*>(frame[0]);
+        if (next <= frame) break;
+        frame = next;
+    }
+    tmoxr::log::Warn(text.str());
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
         g_tmfoxrModule = module;
@@ -5418,6 +5466,9 @@ BOOL WINAPI DllMain(HINSTANCE module, DWORD reason, LPVOID) {
 #ifdef TMFOXR_VIRTUAL_JOYPAD
         if (IsTrackManiaGameProcess()) tmoxr::InstallVirtualJoypad();
 #endif
+        if (IsTrackManiaGameProcess() && tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
+            AddVectoredExceptionHandler(0, &LogAccessViolation);
+        }
     } else if (reason == DLL_PROCESS_DETACH && IsTrackManiaGameProcess()) {
         RemoveCullingFrustumHook();
         RemoveVehicleVisibilityHook();
