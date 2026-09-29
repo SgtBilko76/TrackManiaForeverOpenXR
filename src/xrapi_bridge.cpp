@@ -745,7 +745,7 @@ void VrBridge::SetWindowStereo(bool stereo) {
     std::scoped_lock lock(impl_->mutex);
     if (impl_->windowStereo == stereo) return;
     impl_->windowStereo = stereo;
-    log::Info(stereo ? "XrAPI: race camera detected; switching WinlatorXR to side-by-side VR."
+    log::Info(stereo ? "XrAPI: race detected; switching WinlatorXR to side-by-side VR."
                      : "XrAPI: menu; switching WinlatorXR to its flat virtual screen.");
     if (impl_->initialized) impl_->SendMode(true);
 }

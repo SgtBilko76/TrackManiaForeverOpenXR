@@ -1909,35 +1909,46 @@ struct StereoResources {
 } g_stereo;
 
 // Window-display backends (WinlatorXR) show menus flat and races in VR.
-// TrackMania's menu camera is narrow (vertical scale 3.73, about 30 degrees);
-// race cameras are much wider. A wide perspective camera for a few frames
-// switches to VR, its absence for longer switches back to the flat screen.
-constexpr float kMenuCameraMinVerticalScale = 3.0f;
+// The menu draws only its globe and background in 3D (a handful of draws per
+// frame); races, including their medal and finish screens, draw hundreds.
+// Frames without any 3D (loading screens) keep the current mode. Camera FOV
+// was not usable: the menu camera widens with the screen aspect ratio.
+constexpr uint32_t kRaceMinPerspectiveDraws = 40;
 constexpr uint32_t kFramesToEnterVr = 5;
 constexpr uint32_t kFramesToLeaveVr = 30;
 bool g_windowFlat = tmoxr::VrBridge::UsesGameWindowAsDisplay();
-float g_lastPerspectiveVerticalScale = 0.0f;
-bool g_perspectiveDrawThisFrame = false;
-uint32_t g_wideCameraFrames = 0;
-uint32_t g_narrowCameraFrames = 0;
+uint32_t g_perspectiveDrawsThisFrame = 0;
+uint32_t g_raceFrames = 0;
+uint32_t g_menuFrames = 0;
+uint64_t g_modeFrames = 0;
+uint32_t g_modeDrawsMin = UINT32_MAX;
+uint32_t g_modeDrawsMax = 0;
 
 bool WindowFlat() { return g_windowFlat; }
 
 void UpdateWindowDisplayMode() {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
-    // TrackMania does not re-send its camera every frame, so the last
-    // perspective projection counts for every frame that draws in 3D.
-    const bool wideCamera = g_perspectiveDrawThisFrame &&
-        std::abs(g_lastPerspectiveVerticalScale) < kMenuCameraMinVerticalScale;
-    g_perspectiveDrawThisFrame = false;
-    if (wideCamera) {
-        ++g_wideCameraFrames;
-        g_narrowCameraFrames = 0;
-    } else {
-        ++g_narrowCameraFrames;
-        g_wideCameraFrames = 0;
+    const uint32_t draws = g_perspectiveDrawsThisFrame;
+    g_perspectiveDrawsThisFrame = 0;
+    g_modeDrawsMin = std::min(g_modeDrawsMin, draws);
+    g_modeDrawsMax = std::max(g_modeDrawsMax, draws);
+    if (++g_modeFrames % 900 == 0) {
+        tmoxr::log::Info(std::string("Display mode ") + (g_windowFlat ? "flat" : "VR") +
+            ": 3D draws per frame over the last 900 frames " + std::to_string(g_modeDrawsMin) + "-" +
+            std::to_string(g_modeDrawsMax) + ".");
+        g_modeDrawsMin = UINT32_MAX;
+        g_modeDrawsMax = 0;
     }
-    const bool flat = g_windowFlat ? g_wideCameraFrames < kFramesToEnterVr : g_narrowCameraFrames >= kFramesToLeaveVr;
+    if (draws >= kRaceMinPerspectiveDraws) {
+        ++g_raceFrames;
+        g_menuFrames = 0;
+    } else if (draws > 0) {
+        ++g_menuFrames;
+        g_raceFrames = 0;
+    } else {
+        return;  // no 3D at all: keep the current mode
+    }
+    const bool flat = g_windowFlat ? g_raceFrames < kFramesToEnterVr : g_menuFrames >= kFramesToLeaveVr;
     if (flat == g_windowFlat) return;
     g_windowFlat = flat;
     tmoxr::VrBridge::Instance().SetWindowStereo(!flat);
@@ -4164,7 +4175,6 @@ HRESULT STDMETHODCALLTYPE SetTransformHook(IDirect3DDevice9* device, D3DTRANSFOR
         g_stereo.perspective = nextPerspective;
         if (g_stereo.perspective) {
             LogPerspectiveProjection(device, *matrix);
-            g_lastPerspectiveVerticalScale = matrix->_22;
             g_stereo.perspectivePassSeen = true;
             tmoxr::VrBridge::Instance().OnGameProjection(*matrix);
         }
@@ -4282,7 +4292,7 @@ HRESULT STDMETHODCALLTYPE DrawPrimitiveHook(IDirect3DDevice9* device, D3DPRIMITI
         tmoxr::VrBridge::Instance().OnDraw(false);
     }
     if (g_stereo.perspective) {
-        g_perspectiveDrawThisFrame = true;
+        ++g_perspectiveDrawsThisFrame;
         ++g_stereo.perspectiveDrawCandidates;
         if (g_stereo.customVertexShaderBound) ++g_stereo.shaderPerspectiveCandidates;
     }
@@ -4358,7 +4368,7 @@ HRESULT STDMETHODCALLTYPE DrawIndexedPrimitiveHook(IDirect3DDevice9* device, D3D
         tmoxr::VrBridge::Instance().OnDraw(true);
     }
     if (g_stereo.perspective) {
-        g_perspectiveDrawThisFrame = true;
+        ++g_perspectiveDrawsThisFrame;
         ++g_stereo.perspectiveDrawCandidates;
         if (g_stereo.customVertexShaderBound) ++g_stereo.shaderPerspectiveCandidates;
     }
