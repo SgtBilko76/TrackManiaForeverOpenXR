@@ -618,7 +618,26 @@ struct VrBridge::Impl {
 
     static std::filesystem::path VerticalScalePath() { return ModuleFilePath(L"TMFOXR-xrapi.txt"); }
 
+    // Re-read every second while not adjusting in the headset, so the values
+    // can also be changed over adb (TMFOXR-xrapi.txt: "<vertical> <horizontal>").
+    ULONGLONG lastScaleFileCheck = 0;
+    void ReloadScalesFromFile() {
+        if (verticalScaleAdjusting || GetTickCount64() - lastScaleFileCheck < 1000) return;
+        lastScaleFileCheck = GetTickCount64();
+        std::ifstream file(VerticalScalePath());
+        float vertical = 0.0f;
+        float horizontal = 1.0f;
+        if (!(file >> vertical) || vertical < 0.5f || vertical > 2.0f) return;
+        if (!(file >> horizontal) || horizontal < 0.5f || horizontal > 2.0f) horizontal = 1.0f;
+        if (vertical == verticalScale && horizontal == horizontalScale) return;
+        verticalScale = vertical;
+        horizontalScale = horizontal;
+        log::Info("XrAPI: image scale changed to vertical " + std::to_string(verticalScale) + ", horizontal " +
+            std::to_string(horizontalScale) + " (file).");
+    }
+
     void LoadVerticalScale() {
+        ReloadScalesFromFile();
         if (verticalScaleLoaded) return;
         verticalScaleLoaded = true;
         std::ifstream file(VerticalScalePath());

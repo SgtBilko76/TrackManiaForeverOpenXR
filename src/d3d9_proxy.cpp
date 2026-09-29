@@ -5582,7 +5582,11 @@ std::string DescribeCodeAddress(uintptr_t address) {
 }
 
 LONG CALLBACK LogAccessViolation(EXCEPTION_POINTERS* info) {
-    if (!info || !info->ExceptionRecord || info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
+    if (!info || !info->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+    // Informational exceptions (debug output, thread names) are not errors.
+    if (code == 0x406D1388u || code == 0x40010006u || code == 0x4001000Au || code == DBG_CONTROL_C ||
+        code == 0x80000003u /* breakpoint */) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
     static LONG logged = 0;
@@ -5595,9 +5599,13 @@ LONG CALLBACK LogAccessViolation(EXCEPTION_POINTERS* info) {
     if (index >= 8) return EXCEPTION_CONTINUE_SEARCH;
     seen[index] = address;
     std::ostringstream text;
-    text << "Access violation (" << (info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read")
-         << " of 0x" << std::hex << info->ExceptionRecord->ExceptionInformation[1] << ") at "
-         << DescribeCodeAddress(address) << "; stack:";
+    if (code == EXCEPTION_ACCESS_VIOLATION) {
+        text << "Access violation (" << (info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read")
+             << " of 0x" << std::hex << info->ExceptionRecord->ExceptionInformation[1] << ")";
+    } else {
+        text << "Exception 0x" << std::hex << code;
+    }
+    text << " at " << DescribeCodeAddress(address) << "; stack:";
     auto* frame = reinterpret_cast<uintptr_t*>(info->ContextRecord->Ebp);
     for (int depth = 0; depth < 12 && frame && !IsBadReadPtr(frame, 2 * sizeof(uintptr_t)); ++depth) {
         text << ' ' << DescribeCodeAddress(frame[1]);
