@@ -31,6 +31,7 @@
 #include <cstring>
 #include <cwctype>
 #include <filesystem>
+#include <fstream>
 #include <intrin.h>
 #include <sstream>
 #include <string>
@@ -3741,15 +3742,37 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
         backBuffer->Release();
         return;
     }
-    // Like the Halo mod (HWXR), which works with WinlatorXR: a 10x10 marker
-    // at the top-left of each eye's half, in case the sync is read per eye.
+    // Sync marker layout, switchable while the game runs for diagnosing
+    // WinlatorXR builds: TMFOXR-marker.txt beside the DLL holds "<size>
+    // <both eyes 0/1>". Default: 2x2 in the top-left corner only.
+    static LONG markerSize = 2;
+    static bool markerBothEyes = false;
+    static ULONGLONG markerCheck = 0;
+    if (GetTickCount64() - markerCheck >= 1000) {
+        markerCheck = GetTickCount64();
+        LONG size = 2;
+        int both = 0;
+        std::ifstream markerFile(tmoxr::ModuleFilePath(L"TMFOXR-marker.txt"));
+        if (markerFile >> size >> both && size >= 1 && size <= 64) {
+            if (size != markerSize || (both != 0) != markerBothEyes) {
+                tmoxr::log::Info("Sync marker now " + std::to_string(size) + "x" + std::to_string(size) +
+                    (both ? " in both eyes." : " in the left eye only."));
+            }
+            markerSize = size;
+            markerBothEyes = both != 0;
+        } else {
+            markerSize = 2;
+            markerBothEyes = false;
+        }
+    }
     const auto paintSync = [&] {
-        const LONG size = 10;
         const LONG half = static_cast<LONG>(target.Width / 2);
-        const RECT leftEye{0, 0, size, size};
-        const RECT rightEye{half, 0, half + size, size};
+        const RECT leftEye{0, 0, markerSize, markerSize};
         device->ColorFill(backBuffer, &leftEye, presentation.syncColor);
-        device->ColorFill(backBuffer, &rightEye, presentation.syncColor);
+        if (markerBothEyes) {
+            const RECT rightEye{half, 0, half + markerSize, markerSize};
+            device->ColorFill(backBuffer, &rightEye, presentation.syncColor);
+        }
     };
     // Menus: the unmodified game frame goes onto the curved screen in VR.
     if (WindowFlat() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
