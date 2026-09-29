@@ -682,6 +682,53 @@ WindowFitResult EvaluateWindowFit(HWND window, const D3DPRESENT_PARAMETERS& para
 // WinlatorXR only accepts the frame-sync pixel when its alpha is non-zero.
 // An X8R8G8B8 backbuffer leaves alpha undefined (DXVK may present 0), so the
 // window-display build asks for a real alpha channel.
+// WinlatorXR splits the whole X screen into the two eye halves. TrackMania
+// kept its framed 1920x1080 window while rendering a screen-sized backbuffer,
+// so Present scaled the side-by-side frame into part of the screen: the eyes
+// were squeezed (about 0.8), overlapped and the sync marker was not where
+// WinlatorXR reads it. The window is made borderless, placed at the origin
+// and sized to the screen, with a backbuffer of exactly that size.
+bool ScreenSize(UINT& width, UINT& height) {
+    width = static_cast<UINT>(GetSystemMetrics(SM_CXSCREEN));
+    height = static_cast<UINT>(GetSystemMetrics(SM_CYSCREEN));
+    return width > 0 && height > 0;
+}
+
+void CoverScreenWithWindow(HWND window) {
+    if (!window || !IsWindow(window)) return;
+    UINT width = 0;
+    UINT height = 0;
+    if (!ScreenSize(width, height)) return;
+    RECT rect{};
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    const LONG_PTR popupStyle = (style & ~(WS_OVERLAPPEDWINDOW | WS_DLGFRAME | WS_BORDER)) | WS_POPUP | WS_VISIBLE;
+    if (GetWindowRect(window, &rect) && rect.left == 0 && rect.top == 0 &&
+        rect.right == static_cast<LONG>(width) && rect.bottom == static_cast<LONG>(height) && style == popupStyle) {
+        return;
+    }
+    SetWindowLongPtrW(window, GWL_STYLE, popupStyle);
+    const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+    SetWindowLongPtrW(window, GWL_EXSTYLE,
+        exStyle & ~(WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE));
+    SetWindowPos(window, HWND_TOP, 0, 0, static_cast<int>(width), static_cast<int>(height),
+                 SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    tmoxr::log::Info("Made the TrackMania window borderless and screen-sized: " + std::to_string(width) + "x" +
+        std::to_string(height) + " (was " + std::to_string(rect.right - rect.left) + "x" +
+        std::to_string(rect.bottom - rect.top) + ").");
+}
+
+void FitPresentationToScreen(D3DPRESENT_PARAMETERS& parameters, HWND fallbackWindow) {
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    UINT width = 0;
+    UINT height = 0;
+    if (!ScreenSize(width, height)) return;
+    parameters.Windowed = TRUE;
+    parameters.FullScreen_RefreshRateInHz = 0;
+    parameters.BackBufferWidth = width;
+    parameters.BackBufferHeight = height;
+    CoverScreenWithWindow(parameters.hDeviceWindow ? parameters.hDeviceWindow : fallbackWindow);
+}
+
 void RequestAlphaBackBuffer(D3DPRESENT_PARAMETERS& parameters) {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
     static D3DFORMAT loggedFormat = static_cast<D3DFORMAT>(-1);
@@ -4178,6 +4225,9 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
         g_stereo.packedEyesActive ? g_stereo.renderWidth : 0);
     tmoxr::VrBridge::Instance().SetUiSurface(g_stereo.uiDrawsThisFrame ? g_stereo.uiSurface : nullptr,
         g_stereo.uiDrawsThisFrame ? g_stereo.uiSharedHandle : nullptr);
+    if (tmoxr::VrBridge::UsesGameWindowAsDisplay() && g_stereo.presentedFrames % 120 == 0) {
+        CoverScreenWithWindow(cursorWindow);
+    }
     ComposeWindowPresentation(device);
     tmoxr::VrBridge::Instance().OnBeforePresent(device);
     ++g_stereo.presentedFrames;
@@ -4366,7 +4416,10 @@ HRESULT STDMETHODCALLTYPE ResetHook(IDirect3DDevice9* device, D3DPRESENT_PARAMET
         return originalReset(device, parameters);
     }
     tmoxr::log::Info("IDirect3DDevice9::Reset intercepted; releasing OpenXR swapchains before reset.");
-    if (parameters) RequestAlphaBackBuffer(*parameters);
+    if (parameters) {
+        FitPresentationToScreen(*parameters, g_lockedGameWindow);
+        RequestAlphaBackBuffer(*parameters);
+    }
     tmoxr::VrBridge::Instance().OnBeforeReset();
     if (g_settingsOverlayInitialized) ImGui_ImplDX9_InvalidateDeviceObjects();
     ReleaseStereoResources();
@@ -5229,6 +5282,7 @@ public:
             }
             return result;
         }
+        FitPresentationToScreen(*parameters, window);
         RequestAlphaBackBuffer(*parameters);
         HRESULT result = real_->CreateDevice(a,type,window,flags,parameters,device);
         if (FAILED(result) && nativeFallback_) {
