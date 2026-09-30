@@ -5,10 +5,9 @@
 #   TMFOXR-Quest-Installer-<version>.zip  install.cmd package for the cats builds
 #
 #   LLVM_MINGW_ROOT=~/.local/opt/llvm-mingw-... \
-#     scripts/package-quest-release.sh Beta-0.1 path/to/TMFOXR.wxrprofile.json [out-dir]
+#     scripts/package-quest-release.sh Beta-0.1 packaging/quest/TMFOXR-VR.wxrprofile.json [out-dir]
 #
-# The profile is exported from WinlatorXR Dawn (shortcut settings) with the
-# tested container settings.
+# The profile holds the tested shortcut settings.
 set -euo pipefail
 
 VERSION="${1:?usage: package-quest-release.sh <version> <profile.wxrprofile.json> [out-dir]}"
@@ -51,7 +50,7 @@ DAWN="$STAGE/dawn"
 game_files "$DAWN"
 crlf "$PKG/ModLoader.ini" "$DAWN/ModLoader.ini"
 crlf "$PKG/README_DAWN.txt" "$DAWN/README_DAWN.txt"
-cp "$PROFILE" "$DAWN/TMFOXR.wxrprofile.json"
+cp "$PROFILE" "$DAWN/TMFOXR-VR.wxrprofile.json"
 DAWN_ZIP="$OUT/TMFOXR-Quest-Dawn-$VERSION.zip"
 rm -f "$DAWN_ZIP"
 (cd "$DAWN" && zip -qrX "$DAWN_ZIP" .)

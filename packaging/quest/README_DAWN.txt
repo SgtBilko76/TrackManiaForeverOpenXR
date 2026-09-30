@@ -14,7 +14,7 @@ WHAT IS IN HERE
   TMFOXR.dll            the VR mod (a TMLoader mod)
   TMFOXR.defaults.ini   its default settings
   ModLoader.ini         TMLoader's mod list with TMFOXR added
-  TMFOXR.wxrprofile.json
+  TMFOXR-VR.wxrprofile.json
                         the tested shortcut settings, ready to import into
                         Dawn
   TMFOXR-licenses\      licenses
@@ -38,11 +38,13 @@ INSTALL
 
 4. In WinlatorXR Dawn (drive D: = /sdcard/Download) create a shortcut for
      D:\TmForever\TmForever.exe
-   Copy TMFOXR.wxrprofile.json to
+   Copy TMFOXR-VR.wxrprofile.json to
      /sdcard/Download/Winlator/WxrProfiles/
    and import it in the shortcut's settings. It sets the screen size
-   (3456x1728), DXVK 2.4 with async, the Turnip driver and Box64 with the
-   Performance preset.
+   (3456x1728), the Turnip T26 driver (Turnip_Adreno_Driver_T26 by
+   Mr_Purple_666; pick another Turnip if you do not have it) and Box64 with
+   the Performance preset. Then set the DX wrapper by hand in the
+   container settings: DXVK 2.4 with Async on.
 
 5. Put the headset ON, then start the shortcut. The game switches to VR
    after a few seconds. The mod forces the game to the screen size, so

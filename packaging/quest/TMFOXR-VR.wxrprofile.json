@@ -1,0 +1,21 @@
+{
+  "format": "winlatorxr-shortcut-profile",
+  "version": 1,
+  "game": "TMFOXR-VR",
+  "container": "TmForever",
+  "wineVersion": "proton-9.0-x86_64",
+  "device": "Quest 3",
+  "settings": {
+    "screenSize": "3456x1728",
+    "execArgs": "",
+    "box64Version": "0.4.2",
+    "graphicsDriver": "wrapper",
+    "graphicsDriverConfig": "version=Turnip_Adreno_Driver_T26_(@Mr_Purple_666);blacklistedExtensions=;maxDeviceMemory=0;adrenotoolsTurnip=1;frameSync=Never",
+    "dxwrapper": "dxvk",
+    "audioDriver": "pulseaudio",
+    "emulator": "box64",
+    "box64Preset": "PERFORMANCE",
+    "startupSelection": "1",
+    "cpuList": "0,1,2,3,4,5"
+  }
+}
