@@ -316,6 +316,9 @@ struct VrBridge::Impl {
     // Menus are shown on a curved screen inside the VR image, so WinlatorXR
     // always stays in VR; this only switches the left stick to menu keys.
     bool menuActive = true;  // the game opens in its menus
+    // WinlatorXR shows VR only for races; menus outside a race use its flat
+    // screen mode, which looked sharper than a screen inside VR.
+    bool windowVr = false;
 
     TrackingSample latest{};
     bool haveLatest = false;
@@ -442,7 +445,7 @@ struct VrBridge::Impl {
         // reset, WinlatorXR stays in screen mode (2): in VR mode it reads the
         // sync marker from the game window, and reading a window whose
         // contents were not presented yet crashed it (Drawable.copyArea).
-        const bool ready = framesSinceDevice >= kFramesBeforeVr;
+        const bool ready = framesSinceDevice >= kFramesBeforeVr && windowVr;
         std::string fov = "0 0";
         if (requestedFovDegrees > 1.0f) {
             char text[32]{};
@@ -769,7 +772,8 @@ struct VrBridge::Impl {
     void EndFrame() {
         if (!initialized) return;
         if (++framesSinceDevice == kFramesBeforeVr) {
-            log::Info("XrAPI: the game window has been presented; switching WinlatorXR to VR.");
+            log::Info(std::string("XrAPI: the game window has been presented; WinlatorXR can show VR") +
+                (windowVr ? " and does now." : " once a race starts."));
             SendMode(true);
         }
         if (presentedFrames == 300) LogWindowLayout();
@@ -841,13 +845,22 @@ bool VrBridge::RelatchPoseForMenu() {
     return true;
 }
 
+void VrBridge::SetWindowVr(bool vr) {
+    if (!impl_) return;
+    std::scoped_lock lock(impl_->mutex);
+    if (impl_->windowVr == vr) return;
+    impl_->windowVr = vr;
+    log::Info(vr ? "XrAPI: WinlatorXR switched to VR." : "XrAPI: WinlatorXR switched to its flat screen.");
+    if (impl_->initialized) impl_->SendMode(true);
+}
+
 void VrBridge::SetWindowStereo(bool stereo) {
     if (!impl_) return;
     std::scoped_lock lock(impl_->mutex);
     if (impl_->menuActive == !stereo) return;
     impl_->menuActive = !stereo;
     log::Info(stereo ? "XrAPI: race detected; showing the game in stereo 3D."
-                     : "XrAPI: menu; showing the game on a screen in VR.");
+                     : "XrAPI: menu detected.");
 }
 
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {

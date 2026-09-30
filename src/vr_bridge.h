@@ -44,6 +44,9 @@ public:
     // Window-display backends only: true renders the game in stereo 3D,
     // false shows it on a curved virtual screen inside VR (menus).
     void SetWindowStereo(bool stereo);
+    // Window-display backends: true shows the headset VR (races), false the
+    // host's flat screen mode (menus outside a race).
+    void SetWindowVr(bool vr);
     // Window-display backends, menus only: switches the frame to the newest
     // head pose just before the menu screen is drawn, since the menu image
     // itself does not depend on the pose. Returns true when the pose changed.
