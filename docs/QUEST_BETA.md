@@ -13,8 +13,11 @@ files are included.
 
 - Races in stereo 3D (both eyes every frame), with head tracking and the
   cockpit camera. 4x antialiasing.
-- Menus on a flat screen inside VR, 2.5 m in front of you. There is no 2D
-  fallback.
+- The main menu on WinlatorXR's flat screen, which is sharper than a screen
+  inside VR.
+- VR switches on when a race starts. The pause, medal and finish screens
+  stay in VR, so there is no 2D fallback while playing. VR switches off
+  about two seconds after you are back in the main menu.
 - The Quest controllers as a gamepad, and nothing has to be bound in
   TrackMania.
 - The game follows the WinlatorXR screen size. The mod forces TrackMania's
@@ -96,7 +99,8 @@ These are optional, and all are re-read while the game runs unless noted.
 
 | File | Content |
 |---|---|
-| `TMFOXR-menu.txt` | `<metres> <degrees> [curved 0/1]`: menu screen distance, width and shape. Default: 2.5 m, as wide as a 75° arc, flat. |
+| `TMFOXR-menuvr.txt` | `1` shows the menus outside a race on a screen inside VR instead of WinlatorXR's flat screen. |
+| `TMFOXR-menu.txt` | `<metres> <degrees> [curved 0/1]`: distance, width and shape of that VR menu screen. Default: 2.5 m, as wide as a 75° arc, flat. |
 | `TMFOXR-fov.txt` | Field of view per eye in degrees (default 104.5); `0` uses the headset's own FOV. |
 | `TMFOXR-msaa.txt` | Antialiasing samples: 0, 2, 4 (default) or 8. Read at start. |
 | `TMFOXR-affinity.txt` | CPU mask for the game's main thread; `0` leaves it unpinned. Read at start. |
@@ -104,8 +108,6 @@ These are optional, and all are re-read while the game runs unless noted.
 
 ## Known issues
 
-- The menu screen still moves slightly when you turn your head quickly.
-  Menus run at about 70 fps, below the headset's refresh rate.
 - Short stutters the first time new objects or effects appear, while
   shaders are compiled. DXVK async reduces them.
 - Only TrackMania Nations Forever (Stadium) was tested. United Forever is

@@ -2037,12 +2037,14 @@ struct StereoResources {
 
 // Window-display backends (WinlatorXR) show menus flat and races in VR.
 // The menu draws only its globe and background in 3D (a handful of draws per
-// frame); races, including their medal and finish screens, draw hundreds.
-// Frames without any 3D (loading screens) keep the current mode. Camera FOV
-// was not usable: the menu camera widens with the screen aspect ratio.
+// frame); races, including their pause, medal and finish screens, draw
+// hundreds. Frames without any 3D (loading screens) keep the current mode.
+// Camera FOV was not usable: the menu camera widens with the screen aspect
+// ratio. Leaving VR needs two seconds of menu frames, so a short scene change
+// during a race cannot drop the player to the flat screen.
 constexpr uint32_t kRaceMinPerspectiveDraws = 40;
 constexpr uint32_t kFramesToEnterVr = 5;
-constexpr uint32_t kFramesToLeaveVr = 30;
+constexpr uint32_t kFramesToLeaveVr = 120;
 bool g_windowFlat = tmoxr::VrBridge::UsesGameWindowAsDisplay();
 uint32_t g_perspectiveDrawsThisFrame = 0;
 uint32_t g_raceFrames = 0;
@@ -2053,8 +2055,29 @@ uint32_t g_modeDrawsMax = 0;
 
 bool WindowFlat() { return g_windowFlat; }
 
+// Menus outside a race use WinlatorXR's flat screen mode. TMFOXR-menuvr.txt
+// beside the DLL containing 1 shows them on a screen inside VR instead (the
+// earlier behaviour); re-read every second.
+bool MenuInVr() {
+    static bool menuInVr = false;
+    static ULONGLONG lastCheck = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (lastCheck && now - lastCheck < 1000) return menuInVr;
+    lastCheck = now;
+    int value = 0;
+    std::ifstream file(tmoxr::ModuleFilePath(L"TMFOXR-menuvr.txt"));
+    const bool next = file >> value && value != 0;
+    if (next != menuInVr) {
+        tmoxr::log::Info(next ? "Menus are shown on a screen inside VR (TMFOXR-menuvr.txt)."
+                              : "Menus outside a race are shown on WinlatorXR's flat screen.");
+    }
+    menuInVr = next;
+    return menuInVr;
+}
+
 void UpdateWindowDisplayMode() {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    tmoxr::VrBridge::Instance().SetWindowVr(!g_windowFlat || MenuInVr());
     const uint32_t draws = g_perspectiveDrawsThisFrame;
     g_perspectiveDrawsThisFrame = 0;
     g_modeDrawsMin = std::min(g_modeDrawsMin, draws);
@@ -2079,6 +2102,7 @@ void UpdateWindowDisplayMode() {
     if (flat == g_windowFlat) return;
     g_windowFlat = flat;
     tmoxr::VrBridge::Instance().SetWindowStereo(!flat);
+    tmoxr::VrBridge::Instance().SetWindowVr(!flat || MenuInVr());
 }
 
 using ComputeClippingPlanesFn = void(__thiscall*)(void*, void*, void*);
@@ -4090,7 +4114,7 @@ void CaptureFrameIfRequested(IDirect3DDevice9* device, IDirect3DSurface9* backBu
 void ComposeWindowPresentation(IDirect3DDevice9* device) {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
     // Menus: place the screen with the newest head pose (late latching).
-    if (WindowFlat() && tmoxr::VrBridge::Instance().RelatchPoseForMenu()) {
+    if (WindowFlat() && MenuInVr() && tmoxr::VrBridge::Instance().RelatchPoseForMenu()) {
         g_stereo.haveHeadPose = tmoxr::VrBridge::Instance().GetHeadPose(g_stereo.headPose);
     }
     tmoxr::WindowPresentation presentation{};
@@ -4135,8 +4159,9 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
             device->ColorFill(backBuffer, &rightEye, presentation.syncColor);
         }
     };
-    // Menus: the unmodified game frame goes onto the menu screen in VR.
-    if (WindowFlat() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
+    // Menus: the unmodified game frame goes onto the menu screen in VR, or
+    // stays as it is for WinlatorXR's flat screen mode.
+    if (WindowFlat() && MenuInVr() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
     // Frames without a finished eye pair keep their image but still carry
     // the sync pixel.
     if (WindowFlat() || !g_stereo.ready || !g_stereo.haveRenderConfiguration || !g_stereo.trackedLeftColor ||

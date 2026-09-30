@@ -54,7 +54,8 @@ SETUP - do these in order
    afterwards.
 
 5) Close the window, open WinlatorXR's Shortcuts tab and start TMFOXR-VR
-   with the headset on. The game switches to VR after a few seconds.
+   with the headset on. The main menu appears on WinlatorXR's flat screen;
+   VR switches on when a race starts.
 
 --------------------------------------------------------------------------
 CONTROLS

@@ -2,8 +2,9 @@ TMFOXR - TRACKMANIA FOREVER VR - WinlatorXR DAWN PACKAGE - BETA 0.1
 ====================================================================
 
 TrackMania Nations Forever in VR, standalone on Meta Quest 3 through
-WinlatorXR Dawn: races in stereo 3D with head tracking, menus on a screen
-inside VR, the Quest controllers as a gamepad. You need your own copy of
+WinlatorXR Dawn: races in stereo 3D with head tracking (their pause and
+finish screens stay in VR), the main menu on WinlatorXR's sharp flat
+screen, the Quest controllers as a gamepad. You need your own copy of
 TrackMania Nations Forever (free on Steam) and the TMLoader "prepackaged"
 mod loader. No game files are included. On the WinlatorXR cats builds use
 TMFOXR-Quest-Installer-Beta-0.1.zip instead (it has install.cmd).
@@ -46,8 +47,9 @@ INSTALL
    the Performance preset. Then set the DX wrapper by hand in the
    container settings: DXVK 2.4 with Async on.
 
-5. Put the headset ON, then start the shortcut. The game switches to VR
-   after a few seconds. The mod forces the game to the screen size, so
+5. Put the headset ON, then start the shortcut. The main menu appears on
+   WinlatorXR's flat screen; VR switches on when a race starts and off
+   again about two seconds after you are back in the main menu. The mod forces the game to the screen size, so
    TrackMania's own resolution setting does not matter.
 
 6. Recommended: lower the graphics quality once. Start
