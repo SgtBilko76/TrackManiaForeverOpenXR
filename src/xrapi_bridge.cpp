@@ -353,6 +353,7 @@ struct VrBridge::Impl {
     int syncAgeMax = 0;
     uint64_t syncAgeSamples = 0;
     uint64_t syncWaits = 0;
+    uint64_t menuRelatches = 0;
     double syncWaitMsTotal = 0.0;
     uint64_t repeatedSyncFrames = 0;
 
@@ -814,8 +815,10 @@ struct VrBridge::Impl {
                     std::to_string(static_cast<double>(syncAgeTotal) / 600.0) + ", maximum " +
                     std::to_string(syncAgeMax) + " headset frames (WinlatorXR keeps " +
                     std::to_string(kSyncSlots) + "); waited " + std::to_string(syncWaitMsTotal / 600.0) +
-                    " ms/frame for a new pose.");
+                    " ms/frame for a new pose; " + std::to_string(menuRelatches) +
+                    " menu frames switched to a newer pose before drawing.");
                 syncWaitMsTotal = 0.0;
+                menuRelatches = 0;
                 syncAgeTotal = 0;
                 syncAgeMax = 0;
                 syncAgeSamples = 0;
@@ -850,6 +853,22 @@ bool VrBridge::GetWindowPresentation(WindowPresentation& presentation) {
     if (!impl_->initialized || !impl_->frameLatched || impl_->frameSync < 0) return false;
     // Green must stay 0 and alpha non-zero; blue 0 selects the left/SBS target.
     presentation.syncColor = D3DCOLOR_ARGB(255, impl_->FixedSyncTest() ? 0 : impl_->frameSync, 0, 0);
+    return true;
+}
+
+bool VrBridge::RelatchPoseForMenu() {
+    if (!impl_) return false;
+    std::scoped_lock lock(impl_->mutex);
+    auto& impl = *impl_;
+    // The menu frame was latched at BeginScene, 15-20 ms before it reaches
+    // the headset, so the world-fixed menu screen swam when the head turned.
+    if (!impl.initialized || !impl.frameLatched || !impl.menuActive) return false;
+    impl.Drain();
+    if (!impl.haveLatest || impl.latest.sync == impl.frameSync) return false;
+    impl.frameSync = impl.latest.sync;
+    if (impl.latest.ipd > 0.04f && impl.latest.ipd < 0.09f) impl.frameIpd = impl.latest.ipd;
+    impl.UpdateHeadPose(impl.latest);
+    ++impl.menuRelatches;
     return true;
 }
 

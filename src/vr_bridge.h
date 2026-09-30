@@ -44,6 +44,10 @@ public:
     // Window-display backends only: true renders the game in stereo 3D,
     // false shows it on a curved virtual screen inside VR (menus).
     void SetWindowStereo(bool stereo);
+    // Window-display backends, menus only: switches the frame to the newest
+    // head pose just before the menu screen is drawn, since the menu image
+    // itself does not depend on the pose. Returns true when the pose changed.
+    bool RelatchPoseForMenu();
     void OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters);
     bool TryInitialize();
     void OnBeginScene();

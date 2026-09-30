@@ -34,7 +34,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(dear_imgui)
 
 if(TMFOXR_VR_BACKEND STREQUAL "XrAPI")
-  set(TMFOXR_BRIDGE_SOURCE src/xrapi_bridge.cpp src/virtual_joypad.cpp)
+  set(TMFOXR_BRIDGE_SOURCE src/xrapi_bridge.cpp src/virtual_joypad.cpp src/sampling_profiler.cpp)
 else()
   set(TMFOXR_BRIDGE_SOURCE src/vr_bridge.cpp)
 endif()
