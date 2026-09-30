@@ -9,6 +9,10 @@
 // WinlatorXR keeps emulating a mouse with the right controller, so the
 // wrapper also mutes the DirectInput system mouse; otherwise the right
 // trigger would click an invisible pointer.
+//
+// In races the other controls arrive as TrackMania's default keyboard keys,
+// injected into its DirectInput keyboard, so nothing has to be bound in the
+// game: keys sent with SendInput reached the menus but not the race.
 
 #define DIRECTINPUT_VERSION 0x0800
 #include "controller_input.h"
@@ -89,11 +93,13 @@ DWORD ObjectTypeId(const JoypadObject& object) {
 }
 
 // Raw value of an object: axes -1..1 (DirectInput Y grows downward), buttons 0/1.
+// The buttons always read released: the controller buttons reach TrackMania
+// as keyboard keys, and its default joypad bindings would add a second action
+// (the left trigger, button 2, respawned the car). The buttons stay listed so
+// existing bindings do not break.
 float ObjectValue(const JoypadObject& object, const ControllerState& state) {
     if (!state.connected) return 0.0f;
-    if (object.kind == ObjectKind::Button) {
-        return state.Pressed(kJoypadButtons[object.instance]) ? 1.0f : 0.0f;
-    }
+    if (object.kind == ObjectKind::Button) return 0.0f;
     switch (object.instance) {
     case 0: return state.leftStick[0];
     case 1: return -state.leftStick[1];
@@ -565,10 +571,11 @@ private:
     bool loggedFirstInput_ = false;
 };
 
-// Passes the system mouse through but reports no motion or buttons.
-class MutedMouse final : public IDirectInputDevice8W {
+// Forwards every call to a real DirectInput device.
+class WrappedDevice : public IDirectInputDevice8W {
 public:
-    explicit MutedMouse(IDirectInputDevice8W* real) : real_(real) {}
+    explicit WrappedDevice(IDirectInputDevice8W* real) : real_(real) {}
+    virtual ~WrappedDevice() = default;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** object) override {
         if (!object) return E_POINTER;
@@ -589,6 +596,13 @@ public:
         return remaining;
     }
     HRESULT STDMETHODCALLTYPE GetCapabilities(LPDIDEVCAPS caps) override { return real_->GetCapabilities(caps); }
+    HRESULT STDMETHODCALLTYPE GetDeviceState(DWORD size, LPVOID data) override {
+        return real_->GetDeviceState(size, data);
+    }
+    HRESULT STDMETHODCALLTYPE GetDeviceData(DWORD objectSize, LPDIDEVICEOBJECTDATA records, LPDWORD count,
+                                            DWORD flags) override {
+        return real_->GetDeviceData(objectSize, records, count, flags);
+    }
     HRESULT STDMETHODCALLTYPE EnumObjects(LPDIENUMDEVICEOBJECTSCALLBACKW callback, LPVOID context, DWORD flags) override {
         return real_->EnumObjects(callback, context, flags);
     }
@@ -600,18 +614,6 @@ public:
     }
     HRESULT STDMETHODCALLTYPE Acquire() override { return real_->Acquire(); }
     HRESULT STDMETHODCALLTYPE Unacquire() override { return real_->Unacquire(); }
-    HRESULT STDMETHODCALLTYPE GetDeviceState(DWORD size, LPVOID data) override {
-        const HRESULT result = real_->GetDeviceState(size, data);
-        if (SUCCEEDED(result) && data) std::memset(data, 0, size);
-        return result;
-    }
-    HRESULT STDMETHODCALLTYPE GetDeviceData(DWORD objectSize, LPDIDEVICEOBJECTDATA records, LPDWORD count,
-                                            DWORD flags) override {
-        // Drain the real buffer so it does not overflow, then report nothing.
-        const HRESULT result = real_->GetDeviceData(objectSize, records, count, flags);
-        if (SUCCEEDED(result) && count) *count = 0;
-        return SUCCEEDED(result) ? DI_OK : result;
-    }
     HRESULT STDMETHODCALLTYPE SetDataFormat(LPCDIDATAFORMAT format) override { return real_->SetDataFormat(format); }
     HRESULT STDMETHODCALLTYPE SetEventNotification(HANDLE event) override { return real_->SetEventNotification(event); }
     HRESULT STDMETHODCALLTYPE SetCooperativeLevel(HWND window, DWORD flags) override {
@@ -671,9 +673,175 @@ public:
         return real_->GetImageInfo(header);
     }
 
-private:
+protected:
     IDirectInputDevice8W* real_;
+
+private:
     volatile LONG references_ = 1;
+};
+
+// Passes the system mouse through but reports no motion or buttons.
+class MutedMouse final : public WrappedDevice {
+public:
+    using WrappedDevice::WrappedDevice;
+
+    HRESULT STDMETHODCALLTYPE GetDeviceState(DWORD size, LPVOID data) override {
+        const HRESULT result = real_->GetDeviceState(size, data);
+        if (SUCCEEDED(result) && data) std::memset(data, 0, size);
+        return result;
+    }
+    HRESULT STDMETHODCALLTYPE GetDeviceData(DWORD objectSize, LPDIDEVICEOBJECTDATA records, LPDWORD count,
+                                            DWORD flags) override {
+        // Drain the real buffer so it does not overflow, then report nothing.
+        const HRESULT result = real_->GetDeviceData(objectSize, records, count, flags);
+        if (SUCCEEDED(result) && count) *count = 0;
+        return SUCCEEDED(result) ? DI_OK : result;
+    }
+};
+
+// The system keyboard with the race controls added as TrackMania's default
+// keys, for both immediate (GetDeviceState) and buffered (GetDeviceData)
+// reads. Only active while a race is shown; menus use SendInput. In races the
+// real keyboard is dropped: on the headset its keys come from WinlatorXR's own
+// controller mapping (the left trigger respawned the car on top of braking).
+class RaceKeyboard final : public WrappedDevice {
+public:
+    using WrappedDevice::WrappedDevice;
+
+    HRESULT STDMETHODCALLTYPE GetDeviceState(DWORD size, LPVOID data) override {
+        const HRESULT result = real_->GetDeviceState(size, data);
+        if (FAILED(result) || !data || size < 256) return result;
+        LogFirstRead("GetDeviceState");
+        std::lock_guard lock(mutex_);
+        const bool race = Update();
+        auto* const keys = static_cast<uint8_t*>(data);
+        if (race) std::memset(keys, 0, size);
+        for (size_t index = 0; index < kRaceKeys.size(); ++index) {
+            if (held_[index]) keys[kRaceKeys[index].dik] |= 0x80;
+        }
+        return result;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetDeviceData(DWORD objectSize, LPDIDEVICEOBJECTDATA records, LPDWORD count,
+                                            DWORD flags) override {
+        const DWORD capacity = count ? *count : 0;
+        const HRESULT result = real_->GetDeviceData(objectSize, records, count, flags);
+        if (FAILED(result) || !count) return result;
+        LogFirstRead("GetDeviceData");
+        std::lock_guard lock(mutex_);
+        const bool race = Update();
+        const bool peek = (flags & DIGDD_PEEK) != 0;
+        if (!records) {
+            if (!peek) pending_.clear();
+            return result;
+        }
+        auto* const bytes = reinterpret_cast<uint8_t*>(records);
+        if (race) {
+            for (DWORD index = 0; index < *count && loggedDroppedKeys_ < 16; ++index) {
+                DIDEVICEOBJECTDATA record{};
+                std::memcpy(&record, bytes + static_cast<size_t>(index) * objectSize,
+                            std::min<size_t>(objectSize, sizeof(record)));
+                if (!(record.dwData & 0x80)) continue;
+                ++loggedDroppedKeys_;
+                log::Info("Race: dropped real keyboard key " + std::to_string(record.dwOfs) +
+                    " (from WinlatorXR's controller mapping).");
+            }
+            *count = 0;
+        }
+        size_t added = 0;
+        while (added < pending_.size() && *count < capacity) {
+            DIDEVICEOBJECTDATA record = pending_[added++];
+            std::memcpy(bytes + static_cast<size_t>(*count) * objectSize, &record,
+                        std::min<size_t>(objectSize, sizeof(record)));
+            ++*count;
+        }
+        if (!peek) pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(added));
+        return result;
+    }
+
+private:
+    enum class Action { Accelerate, Brake, Respawn, Restart, RestartAlternative, Pause, Camera1, Camera2, Camera3 };
+    struct RaceKey { Action action; BYTE dik; const char* name; };
+    static constexpr std::array<RaceKey, 9> kRaceKeys{{
+        {Action::Accelerate, DIK_UP, "accelerate"},
+        {Action::Brake, DIK_DOWN, "brake"},
+        {Action::Respawn, DIK_RETURN, "respawn"},
+        {Action::Restart, DIK_BACK, "restart"},
+        {Action::RestartAlternative, DIK_DELETE, "restart"},
+        {Action::Pause, DIK_ESCAPE, "pause"},
+        {Action::Camera1, DIK_1, "camera 1"},
+        {Action::Camera2, DIK_2, "camera 2"},
+        {Action::Camera3, DIK_3, "camera 3"},
+    }};
+    static constexpr ULONGLONG kCameraTapMilliseconds = 80;
+
+    bool Wanted(Action action, const ControllerState& state, ULONGLONG now) const {
+        switch (action) {
+        case Action::Accelerate: return state.Pressed(kRightTrigger);
+        case Action::Brake: return state.Pressed(kLeftTrigger);
+        case Action::Respawn: return state.Pressed(kButtonA);
+        case Action::Restart:
+        case Action::RestartAlternative: return state.Pressed(kButtonB);
+        case Action::Pause: return state.Pressed(kButtonX);
+        case Action::Camera1: return now < cameraTapUntil_ && cameraTap_ == 0;
+        case Action::Camera2: return now < cameraTapUntil_ && cameraTap_ == 1;
+        case Action::Camera3: return now < cameraTapUntil_ && cameraTap_ == 2;
+        }
+        return false;
+    }
+
+    // Brings the held keys up to date and queues their changes for buffered
+    // reads. Returns true while a race is shown.
+    bool Update() {
+        ControllerState state = GetControllerState();
+        const bool race = state.connected && state.race;
+        if (!race) state = {};
+        const ULONGLONG now = GetTickCount64();
+        // Y taps the camera keys 1, 2, 3 in turn.
+        const bool cameraButton = state.Pressed(kButtonY);
+        if (cameraButton && !cameraButtonDown_) {
+            cameraTap_ = nextCamera_;
+            nextCamera_ = (nextCamera_ + 1) % 3;
+            cameraTapUntil_ = now + kCameraTapMilliseconds;
+        }
+        cameraButtonDown_ = cameraButton;
+        for (size_t index = 0; index < kRaceKeys.size(); ++index) {
+            const bool wanted = Wanted(kRaceKeys[index].action, state, now);
+            if (wanted == held_[index]) continue;
+            held_[index] = wanted;
+            DIDEVICEOBJECTDATA record{};
+            record.dwOfs = kRaceKeys[index].dik;
+            record.dwData = wanted ? 0x80 : 0;
+            record.dwTimeStamp = static_cast<DWORD>(now);
+            record.dwSequence = ++sequence_;
+            if (pending_.size() < 64) pending_.push_back(record);
+            if (wanted && loggedKeys_ < 8) {
+                ++loggedKeys_;
+                log::Info(std::string("Race control: ") + kRaceKeys[index].name + " (DirectInput key " +
+                    std::to_string(kRaceKeys[index].dik) + ").");
+            }
+        }
+        return race;
+    }
+
+    void LogFirstRead(const char* method) {
+        if (loggedRead_) return;
+        loggedRead_ = true;
+        log::Info(std::string("TrackMania reads the DirectInput keyboard with ") + method +
+            "; race controls are injected there.");
+    }
+
+    std::mutex mutex_;
+    std::array<bool, kRaceKeys.size()> held_{};
+    std::deque<DIDEVICEOBJECTDATA> pending_;
+    DWORD sequence_ = 0;
+    bool cameraButtonDown_ = false;
+    int cameraTap_ = 0;
+    int nextCamera_ = 0;
+    ULONGLONG cameraTapUntil_ = 0;
+    int loggedKeys_ = 0;
+    int loggedDroppedKeys_ = 0;
+    bool loggedRead_ = false;
 };
 
 bool EnumeratesGameControllers(DWORD deviceType) {
@@ -715,6 +883,9 @@ public:
         if (SUCCEEDED(result) && *device && guid == GUID_SysMouse) {
             *device = new MutedMouse(*device);
             log::Info("Muted the DirectInput system mouse; WinlatorXR's pointer emulation does not reach the game.");
+        } else if (SUCCEEDED(result) && *device && guid == GUID_SysKeyboard) {
+            *device = new RaceKeyboard(*device);
+            log::Info("Wrapped the DirectInput system keyboard for the race controls.");
         }
         return result;
     }

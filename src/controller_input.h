@@ -24,6 +24,7 @@ struct ControllerState {
     float rightStick[2]{};
     uint32_t buttons = 0;   // bit n = ControllerButton n
     bool connected = false; // false when no fresh sample arrived recently
+    bool race = false;      // true while a race is shown in stereo 3D, false in menus
 
     bool Pressed(ControllerButton button) const { return (buttons >> button) & 1u; }
 };

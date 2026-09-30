@@ -124,25 +124,29 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.6 m wide and 1.0 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
-- WinlatorXR always stays in VR. Menus are rendered unmodified and shown on a curved screen inside the VR image: a 100° cylinder segment 1.6 m around the recentered seat position, drawn into both eyes with head tracking. Races (40 or more 3D draws per frame, for five frames) are rendered in stereo 3D; 30 frames with only a few 3D draws switch back to the menu screen, and frames without 3D keep the current mode.
-- The Quest controllers appear in TrackMania as a DirectInput game controller named **Quest Controllers**. Bind it once under Profile → Controls:
+- WinlatorXR always stays in VR. Menus are rendered unmodified and shown on a curved screen inside the VR image: a 75° cylinder segment 2.5 m around the recentered seat position (`TMFOXR-menu.txt` beside the DLL: "<metres> <degrees>", reloaded while running), sampled from a mipmapped copy of the frame (filled by halving it with StretchRect) so the shrunk menu does not shimmer, drawn into both eyes with head tracking. Races (40 or more 3D draws per frame, for five frames) are rendered in stereo 3D; 30 frames with only a few 3D draws switch back to the menu screen, and frames without 3D keep the current mode.
+- Controls work without binding anything in TrackMania:
 
-  | Quest controller | Joypad input |
-  |---|---|
-  | Left stick | X / Y axis (analog) |
-  | Right stick | Rx / Ry axis |
-  | Right trigger | Button 1 |
-  | Left trigger | Button 2 |
-  | A / B / X / Y | Buttons 3 / 4 / 5 / 6 |
-  | Right grip / left grip | Buttons 7 / 8 |
-  | Left stick press | Button 9 |
+  | Quest controller | In races | In menus |
+  |---|---|---|
+  | Left stick | Steer (analog, joypad X axis) | Arrow keys, single steps (repeat after 500 ms, then every 250 ms) |
+  | Right trigger | Accelerate (Up arrow) | – |
+  | Left trigger | Brake (Down arrow) | – |
+  | A | Respawn at the last checkpoint (Enter) | Enter |
+  | B | Restart the track (Backspace and Delete) | Esc |
+  | X | Pause menu (Esc) | – |
+  | Y | Next camera (1, 2, 3 in turn) | – |
+  | Left stick, held 1 s | Recenter the view | Recenter the view |
+  | Right stick press | WinlatorXR's menu (keyboard) | WinlatorXR's menu |
 
-  In menus (flat screen) the left stick sends single arrow-key taps (repeating after 500 ms, then every 250 ms) instead of steering (the joypad then reports it centred); A sends Enter and B sends Esc (injected with `SendInput`, so the game window needs input focus, which it has in WinlatorXR). WinlatorXR's pointer emulation is muted in the game (DirectInput mouse and window mouse messages), and no cursor is drawn. `dinput8!DirectInput8Create` is patched directly, because the Competition Patch bypasses the game's import. The pad reads neutral and keys are released if tracking stops for 300 ms.
+  The race keys are TrackMania's default keyboard keys, injected into its DirectInput keyboard (it reads buffered data); keys sent with `SendInput` reached the menus but not the race. In races the real keyboard is dropped, because on the headset its keys come from WinlatorXR's own controller mapping (left stick → arrow keys, A → the A key, left trigger → a respawn). Menu keys are sent with `SendInput`. The Quest controllers also appear as a DirectInput game controller named **Quest Controllers** (axes X/Y left stick, Rx/Ry right stick; buttons 1 right trigger, 2 left trigger, 3–6 A/B/X/Y, 7/8 right/left grip, 9 left stick press), which steering uses. Its buttons always read released: the controller buttons arrive as keys, and TrackMania's default joypad bindings would add a second action (the left trigger, button 2, respawned the car). WinlatorXR's pointer emulation is muted in the game (DirectInput mouse and window mouse messages), and no cursor is drawn. `dinput8!DirectInput8Create` is patched directly, because the Competition Patch bypasses the game's import. The pad reads neutral and keys are released if tracking stops for 300 ms.
 - Screen-space shaders that write `oPos` without a camera matrix (such as the menu background) are rewritten with D3DX so the stereo replay can keep them fixed in the room.
 - Hold the left thumbstick pressed for one second to recenter the view. The right thumbstick press is WinlatorXR's own menu.
 - For text input (player name, account settings), use WinlatorXR's VR keyboard: press the right thumbstick and choose **Keyboard**. Point at keys with either controller and pull the trigger to type. The view goes flat while the keyboard is open.
-- TrackMania's window is kept borderless at the screen size through its own window calls (CreateWindowExW, SetWindowPos, SetWindowLongW); otherwise it keeps a framed 1920x1080 window that WinlatorXR shows scaled inside a larger screen. Use a **1920×1080** WinlatorXR screen: the installed WinlatorXR build crashed while reading the sync marker from a 3588×1624 window. The Quest build offers TrackMania only that desktop mode, so the game follows the WinlatorXR setting without its own settings menu. WinlatorXR only enters VR after the game has presented 90 frames following device creation or reset; reading a window that was not presented yet crashed it.
+- TrackMania's window is kept borderless at the screen size through its own window calls (CreateWindowExW, SetWindowPos, SetWindowLongW); otherwise it keeps a framed 1920x1080 window that WinlatorXR shows scaled inside a larger screen. Use a **2880×1440** WinlatorXR screen (1440×1440 per eye, square like the FOV); 1920×1080 also works. The installed WinlatorXR build crashed while reading the sync marker from a 3588×1624 window. The Quest build offers TrackMania only that desktop mode, so the game follows the WinlatorXR setting without its own settings menu. WinlatorXR only enters VR after the game has presented 90 frames following device creation or reset; reading a window that was not presented yet crashed it.
 - Like the Halo mod (HWXR), the mod requests a square **104.5° × 104.5°** FOV from WinlatorXR and renders exactly that. With the headset's reported, non-square FOV the view squeezed whenever the head was tilted sideways, however the mod rendered; with the square request it does not. `TMFOXR-fov.txt` beside the DLL overrides the angle (`0` uses the headset FOV).
+- Races are antialiased with 4x MSAA: the eyes are drawn into a multisampled surface that is resolved into the eye texture. `TMFOXR-msaa.txt` beside the DLL sets the sample count (0 turns it off), read at startup.
+- Every 600 frames the log shows the frame rate and where the frame time goes (stereo draws, composition, Present, waiting for a pose). On a Quest 3 at 2880×1440 about 40 ms of a race frame are TrackMania's own emulated CPU work and only about 4 ms the mod's.
 - `TMFOXR_XRAPI_SYNC_WAIT_MS` (default 14, 0 disables) sets how long a frame may wait for a fresh headset pose. `TMFOXR_XRAPI_DIR` overrides `Z:\tmp\xr` for testing.
 
 Build it on Linux with [llvm-mingw](https://github.com/mstorsjo/llvm-mingw):

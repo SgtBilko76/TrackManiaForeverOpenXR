@@ -1924,6 +1924,9 @@ struct StereoResources {
         IDirect3DSurface9* right;
         HANDLE rightSharedHandle;
         bool packed;
+        // Multisampled surface the eyes are drawn into when antialiasing is
+        // on; resolved into `left` before the eye image is read.
+        IDirect3DSurface9* msaa;
     };
     struct ShaderPositionInfo { IDirect3DVertexShader9* shader; UINT baseRegister; };
     IDirect3DSurface9* leftColor = nullptr;
@@ -1936,6 +1939,10 @@ struct StereoResources {
     HANDLE rightSharedHandle = nullptr;
     IDirect3DSurface9* rightDepth = nullptr;
     bool packedEyesActive = false;
+    IDirect3DSurface9* eyeMsaaColor = nullptr;
+    bool eyeMsaaDirty = false;
+    D3DMULTISAMPLE_TYPE eyeMultisample = D3DMULTISAMPLE_NONE;
+    bool eyeMultisampleChosen = false;
     IDirect3DTexture9* uiTexture = nullptr;
     IDirect3DSurface9* uiSurface = nullptr;
     HANDLE uiSharedHandle = nullptr;
@@ -2491,8 +2498,11 @@ void ReleasePrivateEyeTargets() {
         if (pair.leftTexture) pair.leftTexture->Release();
         if (pair.right) pair.right->Release();
         if (pair.rightTexture) pair.rightTexture->Release();
+        if (pair.msaa) pair.msaa->Release();
     }
     g_stereo.colorPairs.clear();
+    g_stereo.eyeMsaaColor = nullptr;
+    g_stereo.eyeMsaaDirty = false;
     g_stereo.trackedLeftColor = nullptr;
     g_stereo.trackedLeftSharedHandle = nullptr;
     g_stereo.rightColor = nullptr;
@@ -2547,6 +2557,77 @@ void UpdateStereoRenderConfiguration(const tmoxr::RenderConfiguration& configura
         std::to_string(g_stereo.renderWidth) + "x" + std::to_string(g_stereo.renderHeight) + " per eye.");
 }
 
+// Antialiasing for window-display (WinlatorXR) builds: the eyes are drawn
+// into a multisampled surface and resolved into the packed eye texture where
+// it is read. TMFOXR-msaa.txt beside the DLL holds the sample count (0, 2, 4
+// or 8), read when the eye targets are allocated; the default is 4.
+constexpr int kDefaultEyeMsaaSamples = 4;
+
+void DisableEyeMultisample(const char* reason) {
+    tmoxr::log::Warn(std::string("Eye antialiasing disabled: ") + reason + ".");
+    g_stereo.eyeMultisample = D3DMULTISAMPLE_NONE;
+    for (auto& pair : g_stereo.colorPairs) {
+        if (pair.msaa) pair.msaa->Release();
+        pair.msaa = nullptr;
+    }
+    g_stereo.eyeMsaaColor = nullptr;
+    g_stereo.eyeMsaaDirty = false;
+    // The shared eye depth surface must match; reallocate it without samples.
+    for (auto** resource : {&g_stereo.depthSource, &g_stereo.trackedLeftDepth, &g_stereo.rightDepth}) {
+        if (*resource) (*resource)->Release();
+        *resource = nullptr;
+    }
+}
+
+D3DMULTISAMPLE_TYPE ChooseEyeMultisample(IDirect3DDevice9* device, D3DFORMAT colorFormat) {
+    if (g_stereo.eyeMultisampleChosen) return g_stereo.eyeMultisample;
+    g_stereo.eyeMultisampleChosen = true;
+    g_stereo.eyeMultisample = D3DMULTISAMPLE_NONE;
+    if (!tmoxr::VrBridge::UsesGameWindowAsDisplay() || !g_stereo.activeDepth) return g_stereo.eyeMultisample;
+    int samples = kDefaultEyeMsaaSamples;
+    std::ifstream samplesFile(tmoxr::ModuleFilePath(L"TMFOXR-msaa.txt"));
+    int fileSamples = 0;
+    if (samplesFile >> fileSamples && fileSamples >= 0 && fileSamples <= 16) samples = fileSamples;
+    D3DSURFACE_DESC depth{};
+    IDirect3D9* direct3d = nullptr;
+    D3DDEVICE_CREATION_PARAMETERS creation{};
+    if (samples < 2 || FAILED(g_stereo.activeDepth->GetDesc(&depth)) ||
+        FAILED(device->GetCreationParameters(&creation)) || FAILED(device->GetDirect3D(&direct3d))) {
+        tmoxr::log::Info("Eye antialiasing off.");
+        return g_stereo.eyeMultisample;
+    }
+    for (int candidate = samples; candidate >= 2; candidate /= 2) {
+        const auto type = static_cast<D3DMULTISAMPLE_TYPE>(candidate);
+        if (SUCCEEDED(direct3d->CheckDeviceMultiSampleType(creation.AdapterOrdinal, creation.DeviceType,
+                colorFormat, TRUE, type, nullptr)) &&
+            SUCCEEDED(direct3d->CheckDeviceMultiSampleType(creation.AdapterOrdinal, creation.DeviceType,
+                depth.Format, TRUE, type, nullptr))) {
+            g_stereo.eyeMultisample = type;
+            break;
+        }
+    }
+    direct3d->Release();
+    tmoxr::log::Info("Eye antialiasing: " + (g_stereo.eyeMultisample == D3DMULTISAMPLE_NONE ?
+        std::string("not supported for ") + std::to_string(samples) + " samples, off" :
+        std::to_string(static_cast<int>(g_stereo.eyeMultisample)) + "x MSAA") + ".");
+    return g_stereo.eyeMultisample;
+}
+
+// Copies the multisampled eye image into the readable eye texture. Must run
+// outside BeginScene/EndScene.
+void ResolveEyeMsaa(IDirect3DDevice9* device, IDirect3DSurface9* msaa, IDirect3DSurface9* resolved) {
+    if (!msaa || !resolved) return;
+    const HRESULT result = device->StretchRect(msaa, nullptr, resolved, nullptr, D3DTEXF_NONE);
+    if (FAILED(result)) {
+        static bool failureLogged = false;
+        if (!failureLogged) {
+            failureLogged = true;
+            tmoxr::log::Warn("Could not resolve the antialiased eye image. HRESULT=" +
+                std::to_string(static_cast<long>(result)));
+        }
+    }
+}
+
 bool EnsureStereoEyeColor(IDirect3DDevice9* device) {
     if (!g_stereo.activeColor) return false;
     for (const auto& pair : g_stereo.colorPairs) {
@@ -2556,6 +2637,7 @@ bool EnsureStereoEyeColor(IDirect3DDevice9* device) {
             g_stereo.rightColor = pair.right;
             g_stereo.rightSharedHandle = pair.rightSharedHandle;
             g_stereo.packedEyesActive = pair.packed;
+            g_stereo.eyeMsaaColor = pair.msaa;
             return true;
         }
     }
@@ -2639,8 +2721,17 @@ bool EnsureStereoEyeColor(IDirect3DDevice9* device) {
         right->AddRef();
     }
     g_stereo.activeColor->AddRef();
+    IDirect3DSurface9* msaa = nullptr;
+    const D3DMULTISAMPLE_TYPE multisample = ChooseEyeMultisample(device, color.Format);
+    if (multisample != D3DMULTISAMPLE_NONE &&
+        FAILED(device->CreateRenderTarget(packedWidth, g_stereo.renderHeight, color.Format,
+            multisample, 0, FALSE, &msaa, nullptr))) {
+        msaa = nullptr;
+        DisableEyeMultisample("could not allocate the multisampled eye target");
+    }
     g_stereo.colorPairs.push_back({g_stereo.activeColor, leftTexture, left, leftSharedHandle,
-        rightTexture, right, rightSharedHandle, true});
+        rightTexture, right, rightSharedHandle, true, msaa});
+    g_stereo.eyeMsaaColor = msaa;
     g_stereo.trackedLeftColor = left;
     g_stereo.trackedLeftSharedHandle = leftSharedHandle;
     g_stereo.rightColor = right;
@@ -2666,8 +2757,8 @@ bool EnsureStereoEyeDepth(IDirect3DDevice9* device) {
     if (FAILED(g_stereo.activeDepth->GetDesc(&depth)) ||
         FAILED(device->CreateDepthStencilSurface(
             g_stereo.renderWidth * 2u,
-            g_stereo.renderHeight, depth.Format, D3DMULTISAMPLE_NONE, 0, TRUE,
-            &g_stereo.trackedLeftDepth, nullptr))) {
+            g_stereo.renderHeight, depth.Format, g_stereo.eyeMsaaColor ? g_stereo.eyeMultisample :
+            D3DMULTISAMPLE_NONE, 0, TRUE, &g_stereo.trackedLeftDepth, nullptr))) {
         tmoxr::log::Warn("Native stereo skipped: could not allocate private eye depth surfaces.");
         if (g_stereo.trackedLeftDepth) g_stereo.trackedLeftDepth->Release();
         if (g_stereo.rightDepth) g_stereo.rightDepth->Release();
@@ -2796,6 +2887,10 @@ void FlushDesktopEyeMirror(IDirect3DDevice9* device) {
                 return;
             }
             g_stereo.sceneActive = false;
+        }
+        if (pair.msaa) {
+            ResolveEyeMsaa(device, pair.msaa, pair.left);
+            if (pair.msaa == g_stereo.eyeMsaaColor) g_stereo.eyeMsaaDirty = false;
         }
         RECT leftEyeRect{
             0, 0, static_cast<LONG>(g_stereo.renderWidth),
@@ -3220,8 +3315,10 @@ void BeginTrackedEye(IDirect3DDevice9* device, bool rightEye, bool applyFixedFun
     // The two private eye targets always have matching dimensions and formats,
     // so they can switch directly. Only detach the depth buffer when entering
     // stereo replay from TrackMania's potentially incompatible game target.
-    IDirect3DSurface9* color = rightEye ? g_stereo.rightColor : g_stereo.trackedLeftColor;
+    IDirect3DSurface9* color = g_stereo.eyeMsaaColor ? g_stereo.eyeMsaaColor :
+        (rightEye ? g_stereo.rightColor : g_stereo.trackedLeftColor);
     IDirect3DSurface9* depth = rightEye ? g_stereo.rightDepth : g_stereo.trackedLeftDepth;
+    if (g_stereo.eyeMsaaColor) g_stereo.eyeMsaaDirty = true;
     if (!g_stereo.trackedEyeTargetBound) {
         g_originalSetDepthStencilSurface(device, nullptr);
         const HRESULT colorResult = g_originalSetRenderTarget(device, 0, color);
@@ -3576,11 +3673,39 @@ EyeProjector MakeEyeProjector(size_t eyeIndex, const D3DSURFACE_DESC& target) {
 }
 
 // Menus are shown on a curved screen inside VR: a cylinder segment around the
-// recentered seat position, 100 degrees wide, its height following the game's
-// aspect ratio.
-constexpr float kCurvedScreenRadiusMeters = 1.6f;
-constexpr float kCurvedScreenArcDegrees = 100.0f;
+// recentered seat position, its height following the game's aspect ratio.
+// TMFOXR-menu.txt beside the DLL holds "<distance metres> <width degrees>",
+// reloaded while the game runs; 1.6 m and 100 degrees felt too close.
+constexpr float kCurvedScreenRadiusMeters = 2.5f;
+constexpr float kCurvedScreenArcDegrees = 75.0f;
 constexpr int kCurvedScreenSegments = 48;
+constexpr UINT kCurvedScreenMipLevels = 4;
+float g_curvedScreenRadius = kCurvedScreenRadiusMeters;
+float g_curvedScreenArcDegrees = kCurvedScreenArcDegrees;
+
+void ReloadCurvedScreenLayout() {
+    static ULONGLONG lastCheck = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (lastCheck && now - lastCheck < 1000) return;
+    lastCheck = now;
+    float radius = kCurvedScreenRadiusMeters;
+    float arc = kCurvedScreenArcDegrees;
+    std::ifstream layoutFile(tmoxr::ModuleFilePath(L"TMFOXR-menu.txt"));
+    float fileRadius = 0.0f;
+    float fileArc = 0.0f;
+    if (layoutFile >> fileRadius >> fileArc && fileRadius >= 0.5f && fileRadius <= 20.0f &&
+        fileArc >= 10.0f && fileArc <= 180.0f) {
+        radius = fileRadius;
+        arc = fileArc;
+    }
+    static bool logged = false;
+    if (logged && radius == g_curvedScreenRadius && arc == g_curvedScreenArcDegrees) return;
+    logged = true;
+    g_curvedScreenRadius = radius;
+    g_curvedScreenArcDegrees = arc;
+    tmoxr::log::Info("Curved menu screen: " + std::to_string(radius) + " m away, " +
+        std::to_string(arc) + " degrees wide.");
+}
 IDirect3DTexture9* g_curvedScreenTexture = nullptr;
 IDirect3DSurface9* g_curvedScreenSurface = nullptr;
 
@@ -3598,15 +3723,22 @@ bool EnsureCurvedScreen(IDirect3DDevice9* device, const D3DSURFACE_DESC& target)
             existing.Height == target.Height && existing.Format == target.Format) return true;
         ReleaseCurvedScreen();
     }
-    if (FAILED(device->CreateTexture(target.Width, target.Height, 1, D3DUSAGE_RENDERTARGET, target.Format,
-                                     D3DPOOL_DEFAULT, &g_curvedScreenTexture, nullptr)) ||
+    // The screen shows the whole frame in about a third of its width in the
+    // eye; without mipmaps the shrunk menu text shimmered and looked blocky.
+    // The mipmaps are filled by halving each level with StretchRect
+    // (WinlatorXR's driver reported no automatic mipmaps).
+    if ((FAILED(device->CreateTexture(target.Width, target.Height, kCurvedScreenMipLevels, D3DUSAGE_RENDERTARGET,
+                                      target.Format, D3DPOOL_DEFAULT, &g_curvedScreenTexture, nullptr)) &&
+         FAILED(device->CreateTexture(target.Width, target.Height, 1, D3DUSAGE_RENDERTARGET, target.Format,
+                                      D3DPOOL_DEFAULT, &g_curvedScreenTexture, nullptr))) ||
         FAILED(g_curvedScreenTexture->GetSurfaceLevel(0, &g_curvedScreenSurface))) {
         ReleaseCurvedScreen();
         tmoxr::log::Warn("Could not allocate the curved menu screen texture.");
         return false;
     }
     tmoxr::log::Info("Allocated the curved menu screen: " + std::to_string(target.Width) + "x" +
-        std::to_string(target.Height) + ".");
+        std::to_string(target.Height) + " with " + std::to_string(g_curvedScreenTexture->GetLevelCount()) +
+        " mipmap levels.");
     return true;
 }
 
@@ -3615,9 +3747,21 @@ bool EnsureCurvedScreen(IDirect3DDevice9* device, const D3DSURFACE_DESC& target)
 void DrawCurvedScreen(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, const D3DSURFACE_DESC& target) {
     if (!EnsureCurvedScreen(device, target) ||
         FAILED(device->StretchRect(backBuffer, nullptr, g_curvedScreenSurface, nullptr, D3DTEXF_NONE))) return;
+    for (DWORD level = 1; level < g_curvedScreenTexture->GetLevelCount(); ++level) {
+        IDirect3DSurface9* larger = nullptr;
+        IDirect3DSurface9* smaller = nullptr;
+        if (SUCCEEDED(g_curvedScreenTexture->GetSurfaceLevel(level - 1, &larger)) &&
+            SUCCEEDED(g_curvedScreenTexture->GetSurfaceLevel(level, &smaller))) {
+            device->StretchRect(larger, nullptr, smaller, nullptr, D3DTEXF_LINEAR);
+        }
+        if (larger) larger->Release();
+        if (smaller) smaller->Release();
+    }
 
-    const float arc = kCurvedScreenArcDegrees * 3.14159265f / 180.0f;
-    const float halfHeight = 0.5f * kCurvedScreenRadiusMeters * arc *
+    ReloadCurvedScreenLayout();
+    const float radius = g_curvedScreenRadius;
+    const float arc = g_curvedScreenArcDegrees * 3.14159265f / 180.0f;
+    const float halfHeight = 0.5f * radius * arc *
         static_cast<float>(target.Height) / static_cast<float>(target.Width);
     std::array<std::vector<PanelVertex>, 2> vertices;
     for (size_t eyeIndex = 0; eyeIndex < 2; ++eyeIndex) {
@@ -3629,8 +3773,8 @@ void DrawCurvedScreen(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, c
                 const float u = static_cast<float>(segment + (corner & 1)) / kCurvedScreenSegments;
                 const float v = corner < 2 ? 0.0f : 1.0f;
                 const float angle = (u - 0.5f) * arc;
-                const Vector3f point{kCurvedScreenRadiusMeters * std::sin(angle), v < 0.5f ? halfHeight : -halfHeight,
-                                     -kCurvedScreenRadiusMeters * std::cos(angle)};
+                const Vector3f point{radius * std::sin(angle), v < 0.5f ? halfHeight : -halfHeight,
+                                     -radius * std::cos(angle)};
                 visible = projector.Project(point, u, v, quad[corner]);
             }
             if (!visible) continue;
@@ -3674,7 +3818,7 @@ void DrawCurvedScreen(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, c
         device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
         device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_LINEAR);
         device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR);
-        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+        device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR);
         device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
         device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
         device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
@@ -3905,6 +4049,10 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
                       static_cast<LONG>(g_stereo.renderHeight)};
     const RECT destination{0, 0, static_cast<LONG>(target.Width / 2 * 2), static_cast<LONG>(target.Height)};
     const bool sameSize = source.right == destination.right && source.bottom == destination.bottom;
+    if (g_stereo.eyeMsaaDirty) {
+        ResolveEyeMsaa(device, g_stereo.eyeMsaaColor, g_stereo.trackedLeftColor);
+        g_stereo.eyeMsaaDirty = false;
+    }
     const HRESULT copy = device->StretchRect(g_stereo.trackedLeftColor, &source, backBuffer, &destination,
                                              sameSize ? D3DTEXF_NONE : D3DTEXF_LINEAR);
     if (FAILED(copy)) {
@@ -4276,6 +4424,46 @@ void AnalyzeVertexShader(IDirect3DVertexShader9* shader) {
     }
 }
 
+// Frame-time breakdown for window-display builds, logged every 600 frames:
+// the time between Presents, the CPU time of the stereo draw replay (both
+// eyes' draw calls), the composition into the window and Present itself,
+// which blocks while the GPU is behind.
+struct FramePerformance {
+    std::chrono::steady_clock::time_point last{};
+    int frames = 0;
+    double frameMs = 0.0;
+    double frameMaxMs = 0.0;
+    double replayMs = 0.0;
+    double composeMs = 0.0;
+    double presentMs = 0.0;
+    uint64_t draws = 0;
+
+    void Record(std::chrono::steady_clock::time_point now, double replay, double compose, double present,
+                uint32_t replayedDraws) {
+        if (last != std::chrono::steady_clock::time_point{}) {
+            const double frame = std::chrono::duration<double, std::milli>(now - last).count();
+            frameMs += frame;
+            frameMaxMs = std::max(frameMaxMs, frame);
+            replayMs += replay;
+            composeMs += compose;
+            presentMs += present;
+            draws += replayedDraws;
+            ++frames;
+        }
+        last = now;
+        if (frames < 600) return;
+        const double count = static_cast<double>(frames);
+        tmoxr::log::Info("Performance over 600 frames: " + std::to_string(1000.0 * count / frameMs) +
+            " FPS, frame " + std::to_string(frameMs / count) + " ms (max " + std::to_string(frameMaxMs) +
+            "), stereo draws " + std::to_string(static_cast<double>(draws) / count) + "/frame taking " +
+            std::to_string(replayMs / count) + " ms, compose " + std::to_string(composeMs / count) +
+            " ms, Present " + std::to_string(presentMs / count) + " ms.");
+        *this = FramePerformance{};
+        last = now;
+    }
+};
+FramePerformance g_framePerformance;
+
 HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* source, const RECT* destination,
                                       HWND window, const RGNDATA* dirtyRegion) {
     FlushDesktopEyeMirror(device);
@@ -4294,8 +4482,13 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
         g_stereo.packedEyesActive ? g_stereo.renderWidth : 0);
     tmoxr::VrBridge::Instance().SetUiSurface(g_stereo.uiDrawsThisFrame ? g_stereo.uiSurface : nullptr,
         g_stereo.uiDrawsThisFrame ? g_stereo.uiSharedHandle : nullptr);
+    const auto composeStart = std::chrono::steady_clock::now();
     ComposeWindowPresentation(device);
+    const double composeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - composeStart).count();
     tmoxr::VrBridge::Instance().OnBeforePresent(device);
+    const double replayMsThisFrame = g_stereo.stereoReplayCpuThisFrame;
+    const uint32_t replayedDrawsThisFrame = g_stereo.replayedDrawsThisFrame;
     ++g_stereo.presentedFrames;
     g_stereo.replayedDrawsMax = std::max(
         g_stereo.replayedDrawsMax, g_stereo.replayedDrawsThisFrame);
@@ -4419,9 +4612,13 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
     g_stereo.stereoReplayCpuThisFrame = 0.0;
     const auto desktopPresentStart = std::chrono::steady_clock::now();
     const HRESULT result = g_originalPresent(device, source, destination, window, dirtyRegion);
-    g_stereo.desktopPresentMilliseconds += std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - desktopPresentStart).count();
+    const auto presentEnd = std::chrono::steady_clock::now();
+    const double presentMs = std::chrono::duration<double, std::milli>(presentEnd - desktopPresentStart).count();
+    g_stereo.desktopPresentMilliseconds += presentMs;
     ++g_stereo.desktopPresentSamples;
+    if (tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
+        g_framePerformance.Record(presentEnd, replayMsThisFrame, composeMs, presentMs, replayedDrawsThisFrame);
+    }
     // The next clear starts a new frame. Keep the completed right-eye 3D scene
     // intact when TrackMania subsequently clears its left-eye UI pass.
     g_stereo.perspectivePassSeen = false;
@@ -4821,9 +5018,11 @@ HRESULT STDMETHODCALLTYPE ClearHook(IDirect3DDevice9* device, DWORD count, const
         (!g_stereo.perspectivePassSeen || g_stereo.perspective)) {
         if (g_stereo.packedEyesActive) {
             g_originalSetDepthStencilSurface(device, nullptr);
-            g_originalSetRenderTarget(device, 0, g_stereo.trackedLeftColor);
+            g_originalSetRenderTarget(device, 0,
+                g_stereo.eyeMsaaColor ? g_stereo.eyeMsaaColor : g_stereo.trackedLeftColor);
             g_originalSetDepthStencilSurface(device, g_stereo.trackedLeftDepth);
             g_originalClear(device, count, rects, flags, color, z, stencil);
+            if (g_stereo.eyeMsaaColor) g_stereo.eyeMsaaDirty = true;
         } else {
             for (bool rightEye : {false, true}) {
                 g_originalSetDepthStencilSurface(device, nullptr);

@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -167,7 +168,8 @@ DWORD SyncWaitMilliseconds() {
 }
 // Menu navigation keys: in menus (flat screen) the left stick sends the arrow
 // keys; in races it steers through the virtual joypad instead. A sends Enter
-// and B Esc. WinlatorXR leaves these buttons unmapped by default. Keys are
+// and B Esc. Race keys (brake, respawn, ...) are injected into TrackMania's
+// DirectInput keyboard instead (virtual_joypad.cpp), which it reads in races. WinlatorXR leaves these buttons unmapped by default. Keys are
 // injected with scan codes because TrackMania reads the keyboard through
 // DirectInput.
 class MenuKeyMapper {
@@ -180,8 +182,8 @@ public:
         Tap(Key::Right, x, now);
         Tap(Key::Up, y, now);
         Tap(Key::Down, -y, now);
-        Set(Key::Enter, state.Pressed(kButtonA));
-        Set(Key::Escape, state.Pressed(kButtonB));
+        Set(Key::Enter, menu && state.Pressed(kButtonA));
+        Set(Key::Escape, menu && state.Pressed(kButtonB));
     }
 
     void ReleaseAll() {
@@ -351,6 +353,7 @@ struct VrBridge::Impl {
     int syncAgeMax = 0;
     uint64_t syncAgeSamples = 0;
     uint64_t syncWaits = 0;
+    double syncWaitMsTotal = 0.0;
     uint64_t repeatedSyncFrames = 0;
 
     bool Initialize() {
@@ -481,6 +484,7 @@ struct VrBridge::Impl {
                 // the joypad reports it centred.
                 ControllerState published = latest.controller;
                 if (menuActive) published.leftStick[0] = published.leftStick[1] = 0.0f;
+                published.race = !menuActive;
                 PublishControllerState(published);
                 ++receivedSamples;
                 received = true;
@@ -499,6 +503,14 @@ struct VrBridge::Impl {
     void WaitForNewSync() {
         if (!haveLatest || latest.sync != lastPresentedSync || !syncWaitMilliseconds) return;
         ++syncWaits;
+        const auto waitStart = std::chrono::steady_clock::now();
+        struct WaitTimer {
+            const std::chrono::steady_clock::time_point& start;
+            double& total;
+            ~WaitTimer() {
+                total += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            }
+        } timer{waitStart, syncWaitMsTotal};
         const ULONGLONG deadline = GetTickCount64() + syncWaitMilliseconds;
         for (;;) {
             const ULONGLONG now = GetTickCount64();
@@ -801,7 +813,9 @@ struct VrBridge::Impl {
                 log::Info("XrAPI: pose age at present over 600 VR frames: average " +
                     std::to_string(static_cast<double>(syncAgeTotal) / 600.0) + ", maximum " +
                     std::to_string(syncAgeMax) + " headset frames (WinlatorXR keeps " +
-                    std::to_string(kSyncSlots) + ").");
+                    std::to_string(kSyncSlots) + "); waited " + std::to_string(syncWaitMsTotal / 600.0) +
+                    " ms/frame for a new pose.");
+                syncWaitMsTotal = 0.0;
                 syncAgeTotal = 0;
                 syncAgeMax = 0;
                 syncAgeSamples = 0;
