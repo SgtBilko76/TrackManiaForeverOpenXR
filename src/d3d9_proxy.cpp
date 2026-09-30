@@ -7,6 +7,7 @@
 #include "vr_bridge.h"
 #ifdef TMFOXR_VIRTUAL_JOYPAD
 #include "controller_input.h"
+#include "sampling_profiler.h"
 #endif
 
 #include <Windows.h>
@@ -397,6 +398,7 @@ using BeginSceneFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*);
 using EndSceneFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*);
 using ResetFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 using SetTransformFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DTRANSFORMSTATETYPE, const D3DMATRIX*);
+using SetTextureStageStateFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, DWORD, D3DTEXTURESTAGESTATETYPE, DWORD);
 using SetViewportFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, const D3DVIEWPORT9*);
 using SetRenderTargetFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, DWORD, IDirect3DSurface9*);
 using DrawPrimitiveFn = HRESULT(STDMETHODCALLTYPE*)(IDirect3DDevice9*, D3DPRIMITIVETYPE, UINT, UINT);
@@ -419,6 +421,7 @@ BeginSceneFn g_originalBeginScene = nullptr;
 EndSceneFn g_originalEndScene = nullptr;
 ResetFn g_originalReset = nullptr;
 SetTransformFn g_originalSetTransform = nullptr;
+SetTextureStageStateFn g_originalSetTextureStageState = nullptr;
 SetViewportFn g_originalSetViewport = nullptr;
 SetRenderTargetFn g_originalSetRenderTarget = nullptr;
 DrawPrimitiveFn g_originalDrawPrimitive = nullptr;
@@ -3250,26 +3253,61 @@ void LogPerspectiveProjection(IDirect3DDevice9* device, const D3DMATRIX& p) {
 // positions (D3DTSS_TCI_CAMERASPACEPOSITION) would follow the tracked view
 // matrix, so such textures (the ground) slid with the head. Their texture
 // matrix gets the inverse head transform, keeping them fixed to the world:
-// tex = pos * View * Head * Head^-1 * Texture. Captured on the left eye of
-// each draw and restored with the game's view.
-struct TexgenStage {
-    bool corrected = false;
-    DWORD flags = 0;
-    D3DMATRIX transform{};
+// tex = pos * View * Head * Head^-1 * Texture, restored with the game's view.
+// The stage states are tracked in the SetTextureStageState/SetTransform hooks;
+// querying them from the device for every draw cost about 2 ms per frame
+// under emulation.
+struct TextureStageTracking {
+    std::array<DWORD, 8> coordinateIndex{};
+    std::array<DWORD, 8> transformFlags{};
+    std::array<D3DMATRIX, 8> transform{};
+    uint32_t cameraSpaceStages = 0;  // bit per stage using camera-space position
+    uint32_t correctedStages = 0;    // stages whose texture state the replay changed
 };
-std::array<TexgenStage, 8> g_texgenStages;
+TextureStageTracking g_textureStages;
 
-void RestoreTexgenStages(IDirect3DDevice9* device) {
-    for (DWORD stage = 0; stage < g_texgenStages.size(); ++stage) {
-        auto& saved = g_texgenStages[stage];
-        if (!saved.corrected) continue;
-        g_originalSetTransform(device, static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage), &saved.transform);
-        device->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, saved.flags);
-        saved.corrected = false;
+// Direct3D's defaults, which also apply after a device reset.
+void ResetTextureStageTracking() {
+    for (DWORD stage = 0; stage < 8; ++stage) {
+        g_textureStages.coordinateIndex[stage] = stage;
+        g_textureStages.transformFlags[stage] = D3DTTFF_DISABLE;
+        g_textureStages.transform[stage] = D3DMATRIX{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    }
+    g_textureStages.cameraSpaceStages = 0;
+    g_textureStages.correctedStages = 0;
+}
+
+void TrackTextureCoordinateIndex(DWORD stage, DWORD value) {
+    g_textureStages.coordinateIndex[stage] = value;
+    const DWORD mode = value & 0xFFFF0000u;
+    const uint32_t bit = 1u << stage;
+    if (mode == D3DTSS_TCI_CAMERASPACEPOSITION) g_textureStages.cameraSpaceStages |= bit;
+    else g_textureStages.cameraSpaceStages &= ~bit;
+    static uint32_t loggedModes = 0;
+    if (mode && mode >> 16 < 32 && !(loggedModes & (1u << (mode >> 16)))) {
+        loggedModes |= 1u << (mode >> 16);
+        // D3DTSS_TCI_* modes: 1 camera-space normal, 2 camera-space position,
+        // 3 camera-space reflection vector, 4 sphere map.
+        tmoxr::log::Info("Fixed-function texture coordinate generation seen: D3DTSS_TCI mode " +
+            std::to_string(mode >> 16) +
+            (mode == D3DTSS_TCI_CAMERASPACEPOSITION ? " (camera-space position; corrected per eye)." : "."));
     }
 }
 
-void CorrectTexgenStages(IDirect3DDevice9* device, const D3DMATRIX& head, bool capture) {
+void RestoreTexgenStages(IDirect3DDevice9* device) {
+    for (DWORD stage = 0; g_textureStages.correctedStages; ++stage) {
+        const uint32_t bit = 1u << stage;
+        if (!(g_textureStages.correctedStages & bit)) continue;
+        g_textureStages.correctedStages &= ~bit;
+        g_originalSetTransform(device, static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage),
+                               &g_textureStages.transform[stage]);
+        g_originalSetTextureStageState(device, stage, D3DTSS_TEXTURETRANSFORMFLAGS,
+                                       g_textureStages.transformFlags[stage]);
+    }
+}
+
+void CorrectTexgenStages(IDirect3DDevice9* device, const D3DMATRIX& head) {
+    if (!g_textureStages.cameraSpaceStages) return;
     Matrix4 headMatrix{};
     std::memcpy(headMatrix.data(), &head._11, sizeof(float) * 16);
     Matrix4 inverseMatrix{};
@@ -3277,41 +3315,20 @@ void CorrectTexgenStages(IDirect3DDevice9* device, const D3DMATRIX& head, bool c
     if (!InvertMatrix(headMatrix, inverseMatrix)) return;
     D3DMATRIX inverseHead{};
     std::memcpy(&inverseHead._11, inverseMatrix.data(), sizeof(float) * 16);
-    static uint32_t loggedModes = 0;
-    for (DWORD stage = 0; stage < g_texgenStages.size(); ++stage) {
-        auto& saved = g_texgenStages[stage];
-        if (capture) {
-            saved.corrected = false;
-            DWORD colorOperation = D3DTOP_DISABLE;
-            if (FAILED(device->GetTextureStageState(stage, D3DTSS_COLOROP, &colorOperation)) ||
-                colorOperation == D3DTOP_DISABLE) break;
-            DWORD index = 0;
-            if (FAILED(device->GetTextureStageState(stage, D3DTSS_TEXCOORDINDEX, &index))) continue;
-            const DWORD mode = index & 0xFFFF0000u;
-            if (mode && !(loggedModes & (1u << (mode >> 16)))) {
-                loggedModes |= 1u << (mode >> 16);
-                // D3DTSS_TCI_* modes: 1 camera-space normal, 2 camera-space position,
-                // 3 camera-space reflection vector, 4 sphere map.
-                tmoxr::log::Info("Fixed-function texture coordinate generation seen: D3DTSS_TCI mode " +
-                    std::to_string(mode >> 16) +
-                    (mode == D3DTSS_TCI_CAMERASPACEPOSITION ? " (camera-space position; corrected per eye)." : "."));
-            }
-            if (mode != D3DTSS_TCI_CAMERASPACEPOSITION) continue;
-            if (FAILED(device->GetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, &saved.flags)) ||
-                FAILED(device->GetTransform(static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage),
-                                            &saved.transform))) continue;
-            saved.corrected = true;
-        }
-        if (!saved.corrected) continue;
-        D3DMATRIX texture = saved.transform;
-        DWORD flags = saved.flags;
+    for (DWORD stage = 0; stage < 8; ++stage) {
+        if (!(g_textureStages.cameraSpaceStages & (1u << stage))) continue;
+        D3DMATRIX texture = g_textureStages.transform[stage];
+        DWORD flags = g_textureStages.transformFlags[stage];
         if ((flags & ~D3DTTFF_PROJECTED) == D3DTTFF_DISABLE) {
             texture = D3DMATRIX{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
             flags = D3DTTFF_COUNT3;
         }
         const D3DMATRIX corrected = MultiplyD3DMatrix(inverseHead, texture);
         g_originalSetTransform(device, static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage), &corrected);
-        if (flags != saved.flags) device->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, flags);
+        if (flags != g_textureStages.transformFlags[stage]) {
+            g_originalSetTextureStageState(device, stage, D3DTSS_TEXTURETRANSFORMFLAGS, flags);
+        }
+        g_textureStages.correctedStages |= 1u << stage;
     }
 }
 
@@ -3332,7 +3349,7 @@ void SetFixedFunctionEyePose(IDirect3DDevice9* device, float eyeOffsetMeters, bo
     }
     const D3DMATRIX trackedView = MultiplyD3DMatrix(g_stereo.view, headRow);
     g_originalSetTransform(device, D3DTS_VIEW, &trackedView);
-    CorrectTexgenStages(device, headRow, !rightEye);
+    CorrectTexgenStages(device, headRow);
 }
 
 struct ShaderEyeState {
@@ -4072,6 +4089,10 @@ void CaptureFrameIfRequested(IDirect3DDevice9* device, IDirect3DSurface9* backBu
 // and stamp the frame-sync pixel that pairs this frame with its head pose.
 void ComposeWindowPresentation(IDirect3DDevice9* device) {
     if (!tmoxr::VrBridge::UsesGameWindowAsDisplay()) return;
+    // Menus: place the screen with the newest head pose (late latching).
+    if (WindowFlat() && tmoxr::VrBridge::Instance().RelatchPoseForMenu()) {
+        g_stereo.haveHeadPose = tmoxr::VrBridge::Instance().GetHeadPose(g_stereo.headPose);
+    }
     tmoxr::WindowPresentation presentation{};
     if (!tmoxr::VrBridge::Instance().GetWindowPresentation(presentation)) return;
 
@@ -4641,6 +4662,9 @@ HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* sour
     if (!renderThreadPinned && tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
         renderThreadPinned = true;
         PinRenderThreadToFastCores();
+#ifdef TMFOXR_VIRTUAL_JOYPAD
+        tmoxr::StartRenderThreadProfilerIfRequested();
+#endif
     }
     FlushDesktopEyeMirror(device);
     D3DDEVICE_CREATION_PARAMETERS creation{};
@@ -4864,6 +4888,7 @@ HRESULT STDMETHODCALLTYPE ResetHook(IDirect3DDevice9* device, D3DPRESENT_PARAMET
     ReleaseStereoResources();
     const HRESULT result = g_originalReset(device, parameters);
     if (SUCCEEDED(result)) {
+        ResetTextureStageTracking();
         CreateStereoResources(device);
         if (g_settingsOverlayInitialized) ImGui_ImplDX9_CreateDeviceObjects();
         tmoxr::VrBridge::Instance().OnDeviceCreated(device, *parameters);
@@ -4893,7 +4918,19 @@ HRESULT STDMETHODCALLTYPE SetTransformHook(IDirect3DDevice9* device, D3DTRANSFOR
         g_stereo.view = *matrix;
         g_stereo.haveView = true;
     }
+    if (matrix && state >= D3DTS_TEXTURE0 && state <= D3DTS_TEXTURE7) {
+        g_textureStages.transform[state - D3DTS_TEXTURE0] = *matrix;
+    }
     return g_originalSetTransform(device, state, matrix);
+}
+
+HRESULT STDMETHODCALLTYPE SetTextureStageStateHook(IDirect3DDevice9* device, DWORD stage,
+                                                   D3DTEXTURESTAGESTATETYPE type, DWORD value) {
+    if (stage < 8) {
+        if (type == D3DTSS_TEXCOORDINDEX) TrackTextureCoordinateIndex(stage, value);
+        else if (type == D3DTSS_TEXTURETRANSFORMFLAGS) g_textureStages.transformFlags[stage] = value;
+    }
+    return g_originalSetTextureStageState(device, stage, type, value);
 }
 
 HRESULT STDMETHODCALLTYPE SetViewportHook(IDirect3DDevice9* device, const D3DVIEWPORT9* viewport) {
@@ -5495,6 +5532,8 @@ bool InstallDeviceHooks(IDirect3DDevice9* device) {
     g_originalBeginScene = reinterpret_cast<BeginSceneFn>(table[41]);
     g_originalEndScene = reinterpret_cast<EndSceneFn>(table[42]);
     g_originalSetTransform = reinterpret_cast<SetTransformFn>(table[44]);
+    g_originalSetTextureStageState = reinterpret_cast<SetTextureStageStateFn>(table[67]);
+    ResetTextureStageTracking();
     g_originalSetViewport = reinterpret_cast<SetViewportFn>(table[47]);
     g_originalSetRenderTarget = reinterpret_cast<SetRenderTargetFn>(table[37]);
     g_originalSetDepthStencilSurface = reinterpret_cast<SetDepthStencilSurfaceFn>(table[39]);
@@ -5511,6 +5550,7 @@ bool InstallDeviceHooks(IDirect3DDevice9* device) {
     table[41] = reinterpret_cast<void*>(&BeginSceneHook);
     table[42] = reinterpret_cast<void*>(&EndSceneHook);
     table[44] = reinterpret_cast<void*>(&SetTransformHook);
+    table[67] = reinterpret_cast<void*>(&SetTextureStageStateHook);
     table[47] = reinterpret_cast<void*>(&SetViewportHook);
     table[37] = reinterpret_cast<void*>(&SetRenderTargetHook);
     table[39] = reinterpret_cast<void*>(&SetDepthStencilSurfaceHook);
@@ -5547,6 +5587,7 @@ void RemoveDeviceHooks(IDirect3DDevice9* device) {
     table[42] = reinterpret_cast<void*>(g_originalEndScene);
     table[43] = reinterpret_cast<void*>(g_originalClear);
     table[44] = reinterpret_cast<void*>(g_originalSetTransform);
+    table[67] = reinterpret_cast<void*>(g_originalSetTextureStageState);
     table[47] = reinterpret_cast<void*>(g_originalSetViewport);
     table[81] = reinterpret_cast<void*>(g_originalDrawPrimitive);
     table[82] = reinterpret_cast<void*>(g_originalDrawIndexedPrimitive);
