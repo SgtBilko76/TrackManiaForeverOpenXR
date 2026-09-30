@@ -306,15 +306,13 @@ struct VrBridge::Impl {
     // 3584x1624 screen (1792x1624 per eye).
     float fovXDegrees = 0.0f;
     float fovYDegrees = 0.0f;
-    // Image scales tuned in the headset (both grips + right stick up/down for
-    // vertical, left/right for horizontal), saved in TMFOXR-xrapi.txt beside
-    // the DLL. WinlatorXR's display does not show the eye image with exactly
-    // the FOV it reports; above 1 the image gets taller or wider.
+    // Image scales for the headset-FOV mode (unused with the default square
+    // FOV), from TMFOXR-xrapi.txt beside the DLL; above 1 the image gets
+    // taller or wider. The grips + right stick gesture that tuned them was
+    // removed: it was no longer needed and the combination crashed the game.
     float verticalScale = 1.0f;
     float horizontalScale = 1.0f;
     bool verticalScaleLoaded = false;
-    bool verticalScaleAdjusting = false;
-    ULONGLONG lastScaleTick = 0;
     // Menus are shown on a curved screen inside the VR image, so WinlatorXR
     // always stays in VR; this only switches the left stick to menu keys.
     bool menuActive = true;  // the game opens in its menus
@@ -686,11 +684,11 @@ struct VrBridge::Impl {
 
     static std::filesystem::path VerticalScalePath() { return ModuleFilePath(L"TMFOXR-xrapi.txt"); }
 
-    // Re-read every second while not adjusting in the headset, so the values
-    // can also be changed over adb (TMFOXR-xrapi.txt: "<vertical> <horizontal>").
+    // Re-read every second, so the values can be changed over adb
+    // (TMFOXR-xrapi.txt: "<vertical> <horizontal>").
     ULONGLONG lastScaleFileCheck = 0;
     void ReloadScalesFromFile() {
-        if (verticalScaleAdjusting || GetTickCount64() - lastScaleFileCheck < 1000) return;
+        if (GetTickCount64() - lastScaleFileCheck < 1000) return;
         lastScaleFileCheck = GetTickCount64();
         std::ifstream file(VerticalScalePath());
         float vertical = 0.0f;
@@ -714,35 +712,7 @@ struct VrBridge::Impl {
         if (file >> vertical && vertical >= 0.5f && vertical <= 2.0f) verticalScale = vertical;
         if (file >> horizontal && horizontal >= 0.5f && horizontal <= 2.0f) horizontalScale = horizontal;
         log::Info("XrAPI: image scale vertical " + std::to_string(verticalScale) + ", horizontal " +
-            std::to_string(horizontalScale) + " (hold both grips and move the right stick to adjust).");
-    }
-
-    // Both grips held: the right stick scales the image vertically, live.
-    void AdjustVerticalScale(const ControllerState& state) {
-        const bool held = state.Pressed(kLeftGrip) && state.Pressed(kRightGrip);
-        const float stickX = state.rightStick[0];
-        const float stickY = state.rightStick[1];
-        const ULONGLONG now = GetTickCount64();
-        const float seconds = lastScaleTick ? std::min(0.1f, (now - lastScaleTick) / 1000.0f) : 0.0f;
-        lastScaleTick = now;
-        if (held && (std::abs(stickX) > 0.3f || std::abs(stickY) > 0.3f)) {
-            // About 10% per second at full deflection, independent of frame
-            // rate, one axis at a time. Content appears larger when the
-            // rendered angle shrinks.
-            if (std::abs(stickY) >= std::abs(stickX)) {
-                verticalScale = std::clamp(verticalScale * std::pow(1.10f, stickY * seconds), 0.5f, 2.0f);
-            } else {
-                horizontalScale = std::clamp(horizontalScale * std::pow(1.10f, stickX * seconds), 0.5f, 2.0f);
-            }
-            verticalScaleAdjusting = true;
-            return;
-        }
-        if (!held && verticalScaleAdjusting) {
-            verticalScaleAdjusting = false;
-            std::ofstream(VerticalScalePath()) << verticalScale << " " << horizontalScale << "\n";
-            log::Info("XrAPI: image scale set to vertical " + std::to_string(verticalScale) + ", horizontal " +
-                std::to_string(horizontalScale) + " and saved.");
-        }
+            std::to_string(horizontalScale) + " (TMFOXR-xrapi.txt; used only without the square FOV).");
     }
 
     void UpdateRenderConfiguration(const TrackingSample& sample) {
@@ -792,7 +762,6 @@ struct VrBridge::Impl {
         frameLatched = true;
         frameSync = latest.sync;
         if (latest.ipd > 0.04f && latest.ipd < 0.09f) frameIpd = latest.ipd;
-        AdjustVerticalScale(latest.controller);
         UpdateHeadPose(latest);
         UpdateRenderConfiguration(latest);
     }
