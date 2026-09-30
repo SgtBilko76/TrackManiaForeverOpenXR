@@ -3,3 +3,4 @@
 *.log
 /build-profile
 /build-quest/
+/release/
