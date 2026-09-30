@@ -782,7 +782,7 @@ private:
         case Action::Respawn: return state.Pressed(kButtonA);
         case Action::Restart:
         case Action::RestartAlternative: return state.Pressed(kButtonB);
-        case Action::Pause: return state.Pressed(kButtonX);
+        case Action::Pause: return state.Pressed(kLeftMenu);
         case Action::Camera1: return now < cameraTapUntil_ && cameraTap_ == 0;
         case Action::Camera2: return now < cameraTapUntil_ && cameraTap_ == 1;
         case Action::Camera3: return now < cameraTapUntil_ && cameraTap_ == 2;

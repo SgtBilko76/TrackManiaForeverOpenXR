@@ -124,7 +124,7 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
 - Both eyes are rendered side by side into the game window at half its width each. The captured menus/HUD are drawn on a panel fixed in the room, 1.6 m wide and 1.0 m in front of the recentered seat position. The 3D scene uses the IPD the headset reports.
 - The top-left pixel carries the frame's `HMD_SYNC` value, so WinlatorXR shows each frame with the head pose it was rendered from.
 - Fullscreen is allowed and the window size is not locked, because the window itself is the headset image.
-- WinlatorXR always stays in VR. Menus are rendered unmodified and shown on a curved screen inside the VR image: a 75° cylinder segment 2.5 m around the recentered seat position (`TMFOXR-menu.txt` beside the DLL: "<metres> <degrees>", reloaded while running), sampled from a mipmapped copy of the frame (filled by halving it with StretchRect) so the shrunk menu does not shimmer, drawn into both eyes with head tracking. Races (40 or more 3D draws per frame, for five frames) are rendered in stereo 3D; 30 frames with only a few 3D draws switch back to the menu screen, and frames without 3D keep the current mode.
+- WinlatorXR always stays in VR. Menus are rendered unmodified and shown on a flat screen inside the VR image, 2.5 m in front of the recentered seat position and as wide as a 75° arc would be long (it looked sharper than a curved screen; `TMFOXR-menu.txt` beside the DLL: "<metres> <degrees> [curved 0/1]", reloaded while running), sampled from a mipmapped copy of the frame (filled by halving it with StretchRect) so the shrunk menu does not shimmer, drawn into both eyes with head tracking. Races (40 or more 3D draws per frame, for five frames) are rendered in stereo 3D; 30 frames with only a few 3D draws switch back to the menu screen, and frames without 3D keep the current mode.
 - Controls work without binding anything in TrackMania:
 
   | Quest controller | In races | In menus |
@@ -134,7 +134,8 @@ WinlatorXR's [XrAPI 0.5](https://winlatorxr.github.io/xrapi.html):
   | Left trigger | Brake (Down arrow) | – |
   | A | Respawn at the last checkpoint (Enter) | Enter |
   | B | Restart the track (Backspace and Delete) | Esc |
-  | X | Pause menu (Esc) | – |
+  | Left menu button (≡) | Pause menu (Esc) | – |
+| X | – | – |
   | Y | Next camera (1, 2, 3 in turn) | – |
   | Left stick, held 1 s | Recenter the view | Recenter the view |
   | Right stick press | WinlatorXR's menu (keyboard) | WinlatorXR's menu |
