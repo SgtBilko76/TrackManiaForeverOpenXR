@@ -4544,8 +4544,104 @@ struct FramePerformance {
 };
 FramePerformance g_framePerformance;
 
+// Maximum clock of a logical processor in kHz, read from Linux sysfs through
+// Wine's \\?\unix\ path prefix; 0 when unavailable (not running on Wine).
+unsigned long long LinuxCpuMaxFrequency(unsigned processor) {
+    const std::wstring path = L"\\\\?\\unix\\sys\\devices\\system\\cpu\\cpu" + std::to_wstring(processor) +
+        L"\\cpufreq\\cpuinfo_max_freq";
+    std::ifstream file(path.c_str());
+    unsigned long long frequency = 0;
+    return file >> frequency ? frequency : 0;
+}
+
+// Standalone headsets: TrackMania does nearly all its work on its render
+// thread, which kept one core busy under emulation while the others idled.
+// On a Quest 3 two of the six cores are clocked lower (2.05 instead of
+// 2.36 GHz, and they idled at 1.38 GHz), so the thread is kept on the cores
+// with the highest maximum clock. Wine reported every core with the same
+// efficiency class there, so the clocks come from Linux sysfs.
+// TMFOXR-affinity.txt beside the DLL overrides the mask (decimal or 0x-hex;
+// 0 leaves the thread unpinned).
+void PinRenderThreadToFastCores() {
+    DWORD_PTR mask = 0;
+    std::string reason;
+    std::ifstream overrideFile(tmoxr::ModuleFilePath(L"TMFOXR-affinity.txt"));
+    std::string text;
+    if (overrideFile >> text) {
+        mask = static_cast<DWORD_PTR>(std::strtoull(text.c_str(), nullptr, 0));
+        reason = "from TMFOXR-affinity.txt";
+    } else {
+        DWORD length = 0;
+        GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+        std::vector<uint8_t> buffer(length);
+        auto* info = reinterpret_cast<SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data());
+        if (!length || !GetLogicalProcessorInformationEx(RelationProcessorCore, info, &length)) {
+            tmoxr::log::Warn("Could not read the CPU core layout; the render thread stays unpinned.");
+            return;
+        }
+        BYTE fastest = 0;
+        std::vector<std::pair<BYTE, DWORD_PTR>> cores;
+        std::string layout;
+        for (DWORD offset = 0; offset < length;) {
+            const auto* entry = reinterpret_cast<const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*>(buffer.data() + offset);
+            if (entry->Relationship == RelationProcessorCore && entry->Processor.GroupCount) {
+                const DWORD_PTR coreMask = entry->Processor.GroupMask[0].Mask;
+                cores.emplace_back(entry->Processor.EfficiencyClass, coreMask);
+                fastest = std::max(fastest, entry->Processor.EfficiencyClass);
+                layout += (layout.empty() ? "" : ", ") + std::to_string(static_cast<unsigned long long>(coreMask)) +
+                    ":" + std::to_string(entry->Processor.EfficiencyClass);
+            }
+            offset += entry->Size;
+        }
+        for (const auto& [efficiency, coreMask] : cores) {
+            if (efficiency == fastest) mask |= coreMask;
+        }
+        reason = "cores with efficiency class " + std::to_string(fastest) + " (mask:class " + layout + ")";
+        DWORD_PTR processMask = 0;
+        DWORD_PTR systemMask = 0;
+        GetProcessAffinityMask(GetCurrentProcess(), &processMask, &systemMask);
+        if (mask == systemMask) {
+            // Equal classes: compare the Linux maximum clocks instead.
+            unsigned long long fastestClock = 0;
+            DWORD_PTR clockMask = 0;
+            std::string clocks;
+            for (unsigned processor = 0; processor < sizeof(DWORD_PTR) * 8; ++processor) {
+                if (!(systemMask & (static_cast<DWORD_PTR>(1) << processor))) continue;
+                const unsigned long long clock = LinuxCpuMaxFrequency(processor);
+                clocks += (clocks.empty() ? "" : ", ") + std::to_string(processor) + ":" + std::to_string(clock / 1000);
+                if (clock > fastestClock) {
+                    fastestClock = clock;
+                    clockMask = 0;
+                }
+                if (clock && clock == fastestClock) clockMask |= static_cast<DWORD_PTR>(1) << processor;
+            }
+            if (clockMask) {
+                mask = clockMask;
+                reason = "cores with the highest maximum clock (core:MHz " + clocks + ")";
+            }
+        }
+        if (cores.size() < 2) mask = 0;
+        if (mask && mask == systemMask) {
+            tmoxr::log::Info("All CPU cores are equally fast (" + reason + "); the render thread stays unpinned.");
+            return;
+        }
+    }
+    if (!mask) {
+        tmoxr::log::Info("Render thread left unpinned (" + reason + ").");
+        return;
+    }
+    const DWORD_PTR previous = SetThreadAffinityMask(GetCurrentThread(), mask);
+    tmoxr::log::Info("Render thread pinned to CPU mask " + std::to_string(static_cast<unsigned long long>(mask)) +
+        ", " + reason + (previous ? "." : "; SetThreadAffinityMask failed, error " + std::to_string(GetLastError()) + "."));
+}
+
 HRESULT STDMETHODCALLTYPE PresentHook(IDirect3DDevice9* device, const RECT* source, const RECT* destination,
                                       HWND window, const RGNDATA* dirtyRegion) {
+    static bool renderThreadPinned = false;
+    if (!renderThreadPinned && tmoxr::VrBridge::UsesGameWindowAsDisplay()) {
+        renderThreadPinned = true;
+        PinRenderThreadToFastCores();
+    }
     FlushDesktopEyeMirror(device);
     D3DDEVICE_CREATION_PARAMETERS creation{};
     HWND cursorWindow = window;
