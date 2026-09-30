@@ -3246,6 +3246,75 @@ void LogPerspectiveProjection(IDirect3DDevice9* device, const D3DMATRIX& p) {
     tmoxr::log::Info(text.str());
 }
 
+// Fixed-function texture stages that generate coordinates from camera-space
+// positions (D3DTSS_TCI_CAMERASPACEPOSITION) would follow the tracked view
+// matrix, so such textures (the ground) slid with the head. Their texture
+// matrix gets the inverse head transform, keeping them fixed to the world:
+// tex = pos * View * Head * Head^-1 * Texture. Captured on the left eye of
+// each draw and restored with the game's view.
+struct TexgenStage {
+    bool corrected = false;
+    DWORD flags = 0;
+    D3DMATRIX transform{};
+};
+std::array<TexgenStage, 8> g_texgenStages;
+
+void RestoreTexgenStages(IDirect3DDevice9* device) {
+    for (DWORD stage = 0; stage < g_texgenStages.size(); ++stage) {
+        auto& saved = g_texgenStages[stage];
+        if (!saved.corrected) continue;
+        g_originalSetTransform(device, static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage), &saved.transform);
+        device->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, saved.flags);
+        saved.corrected = false;
+    }
+}
+
+void CorrectTexgenStages(IDirect3DDevice9* device, const D3DMATRIX& head, bool capture) {
+    Matrix4 headMatrix{};
+    std::memcpy(headMatrix.data(), &head._11, sizeof(float) * 16);
+    Matrix4 inverseMatrix{};
+    // The row/column layout does not matter: inverse(transpose) = transpose(inverse).
+    if (!InvertMatrix(headMatrix, inverseMatrix)) return;
+    D3DMATRIX inverseHead{};
+    std::memcpy(&inverseHead._11, inverseMatrix.data(), sizeof(float) * 16);
+    static uint32_t loggedModes = 0;
+    for (DWORD stage = 0; stage < g_texgenStages.size(); ++stage) {
+        auto& saved = g_texgenStages[stage];
+        if (capture) {
+            saved.corrected = false;
+            DWORD colorOperation = D3DTOP_DISABLE;
+            if (FAILED(device->GetTextureStageState(stage, D3DTSS_COLOROP, &colorOperation)) ||
+                colorOperation == D3DTOP_DISABLE) break;
+            DWORD index = 0;
+            if (FAILED(device->GetTextureStageState(stage, D3DTSS_TEXCOORDINDEX, &index))) continue;
+            const DWORD mode = index & 0xFFFF0000u;
+            if (mode && !(loggedModes & (1u << (mode >> 16)))) {
+                loggedModes |= 1u << (mode >> 16);
+                // D3DTSS_TCI_* modes: 1 camera-space normal, 2 camera-space position,
+                // 3 camera-space reflection vector, 4 sphere map.
+                tmoxr::log::Info("Fixed-function texture coordinate generation seen: D3DTSS_TCI mode " +
+                    std::to_string(mode >> 16) +
+                    (mode == D3DTSS_TCI_CAMERASPACEPOSITION ? " (camera-space position; corrected per eye)." : "."));
+            }
+            if (mode != D3DTSS_TCI_CAMERASPACEPOSITION) continue;
+            if (FAILED(device->GetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, &saved.flags)) ||
+                FAILED(device->GetTransform(static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage),
+                                            &saved.transform))) continue;
+            saved.corrected = true;
+        }
+        if (!saved.corrected) continue;
+        D3DMATRIX texture = saved.transform;
+        DWORD flags = saved.flags;
+        if ((flags & ~D3DTTFF_PROJECTED) == D3DTTFF_DISABLE) {
+            texture = D3DMATRIX{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            flags = D3DTTFF_COUNT3;
+        }
+        const D3DMATRIX corrected = MultiplyD3DMatrix(inverseHead, texture);
+        g_originalSetTransform(device, static_cast<D3DTRANSFORMSTATETYPE>(D3DTS_TEXTURE0 + stage), &corrected);
+        if (flags != saved.flags) device->SetTextureStageState(stage, D3DTSS_TEXTURETRANSFORMFLAGS, flags);
+    }
+}
+
 void SetFixedFunctionEyePose(IDirect3DDevice9* device, float eyeOffsetMeters, bool rightEye) {
     const Matrix4 projectionColumn = EyeProjection(rightEye);
     D3DMATRIX projectionRow{};
@@ -3263,6 +3332,7 @@ void SetFixedFunctionEyePose(IDirect3DDevice9* device, float eyeOffsetMeters, bo
     }
     const D3DMATRIX trackedView = MultiplyD3DMatrix(g_stereo.view, headRow);
     g_originalSetTransform(device, D3DTS_VIEW, &trackedView);
+    CorrectTexgenStages(device, headRow, !rightEye);
 }
 
 struct ShaderEyeState {
@@ -3363,6 +3433,7 @@ void RestoreGameEye(IDirect3DDevice9* device, bool restoreFixedFunctionPose,
     if (restoreFixedFunctionPose) {
         g_originalSetTransform(device, D3DTS_PROJECTION, &g_stereo.projection);
         if (g_stereo.haveView) g_originalSetTransform(device, D3DTS_VIEW, &g_stereo.view);
+        RestoreTexgenStages(device);
     }
     if (restoreGameTarget) RestoreGameTarget(device);
 }
