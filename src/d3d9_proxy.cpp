@@ -3672,16 +3672,19 @@ EyeProjector MakeEyeProjector(size_t eyeIndex, const D3DSURFACE_DESC& target) {
     return projector;
 }
 
-// Menus are shown on a curved screen inside VR: a cylinder segment around the
-// recentered seat position, its height following the game's aspect ratio.
-// TMFOXR-menu.txt beside the DLL holds "<distance metres> <width degrees>",
-// reloaded while the game runs; 1.6 m and 100 degrees felt too close.
+// Menus are shown on a screen inside VR in front of the recentered seat
+// position, its height following the game's aspect ratio. By default it is
+// flat (it looked sharper than the curved one) and as wide as a 75-degree
+// arc at 2.5 m would be long. TMFOXR-menu.txt beside the DLL holds
+// "<distance metres> <width degrees> [curved 0/1]", reloaded while the game
+// runs; 1.6 m and 100 degrees felt too close.
 constexpr float kCurvedScreenRadiusMeters = 2.5f;
 constexpr float kCurvedScreenArcDegrees = 75.0f;
 constexpr int kCurvedScreenSegments = 48;
 constexpr UINT kCurvedScreenMipLevels = 4;
 float g_curvedScreenRadius = kCurvedScreenRadiusMeters;
 float g_curvedScreenArcDegrees = kCurvedScreenArcDegrees;
+bool g_curvedScreenCurved = false;
 
 void ReloadCurvedScreenLayout() {
     static ULONGLONG lastCheck = 0;
@@ -3690,6 +3693,7 @@ void ReloadCurvedScreenLayout() {
     lastCheck = now;
     float radius = kCurvedScreenRadiusMeters;
     float arc = kCurvedScreenArcDegrees;
+    bool curved = false;
     std::ifstream layoutFile(tmoxr::ModuleFilePath(L"TMFOXR-menu.txt"));
     float fileRadius = 0.0f;
     float fileArc = 0.0f;
@@ -3697,14 +3701,18 @@ void ReloadCurvedScreenLayout() {
         fileArc >= 10.0f && fileArc <= 180.0f) {
         radius = fileRadius;
         arc = fileArc;
+        int fileCurved = 0;
+        if (layoutFile >> fileCurved) curved = fileCurved != 0;
     }
     static bool logged = false;
-    if (logged && radius == g_curvedScreenRadius && arc == g_curvedScreenArcDegrees) return;
+    if (logged && radius == g_curvedScreenRadius && arc == g_curvedScreenArcDegrees &&
+        curved == g_curvedScreenCurved) return;
     logged = true;
     g_curvedScreenRadius = radius;
     g_curvedScreenArcDegrees = arc;
-    tmoxr::log::Info("Curved menu screen: " + std::to_string(radius) + " m away, " +
-        std::to_string(arc) + " degrees wide.");
+    g_curvedScreenCurved = curved;
+    tmoxr::log::Info(std::string(curved ? "Curved" : "Flat") + " menu screen: " + std::to_string(radius) +
+        " m away, as wide as a " + std::to_string(arc) + "-degree arc.");
 }
 IDirect3DTexture9* g_curvedScreenTexture = nullptr;
 IDirect3DSurface9* g_curvedScreenSurface = nullptr;
@@ -3736,7 +3744,7 @@ bool EnsureCurvedScreen(IDirect3DDevice9* device, const D3DSURFACE_DESC& target)
         tmoxr::log::Warn("Could not allocate the curved menu screen texture.");
         return false;
     }
-    tmoxr::log::Info("Allocated the curved menu screen: " + std::to_string(target.Width) + "x" +
+    tmoxr::log::Info("Allocated the menu screen: " + std::to_string(target.Width) + "x" +
         std::to_string(target.Height) + " with " + std::to_string(g_curvedScreenTexture->GetLevelCount()) +
         " mipmap levels.");
     return true;
@@ -3773,8 +3781,9 @@ void DrawCurvedScreen(IDirect3DDevice9* device, IDirect3DSurface9* backBuffer, c
                 const float u = static_cast<float>(segment + (corner & 1)) / kCurvedScreenSegments;
                 const float v = corner < 2 ? 0.0f : 1.0f;
                 const float angle = (u - 0.5f) * arc;
-                const Vector3f point{radius * std::sin(angle), v < 0.5f ? halfHeight : -halfHeight,
-                                     -radius * std::cos(angle)};
+                const Vector3f point = g_curvedScreenCurved ?
+                    Vector3f{radius * std::sin(angle), v < 0.5f ? halfHeight : -halfHeight, -radius * std::cos(angle)} :
+                    Vector3f{radius * angle, v < 0.5f ? halfHeight : -halfHeight, -radius};
                 visible = projector.Project(point, u, v, quad[corner]);
             }
             if (!visible) continue;
@@ -4034,7 +4043,7 @@ void ComposeWindowPresentation(IDirect3DDevice9* device) {
             device->ColorFill(backBuffer, &rightEye, presentation.syncColor);
         }
     };
-    // Menus: the unmodified game frame goes onto the curved screen in VR.
+    // Menus: the unmodified game frame goes onto the menu screen in VR.
     if (WindowFlat() && g_stereo.haveRenderConfiguration) DrawCurvedScreen(device, backBuffer, target);
     // Frames without a finished eye pair keep their image but still carry
     // the sync pixel.

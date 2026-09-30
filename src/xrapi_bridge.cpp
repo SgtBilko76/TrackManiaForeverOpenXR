@@ -859,7 +859,7 @@ void VrBridge::SetWindowStereo(bool stereo) {
     if (impl_->menuActive == !stereo) return;
     impl_->menuActive = !stereo;
     log::Info(stereo ? "XrAPI: race detected; showing the game in stereo 3D."
-                     : "XrAPI: menu; showing the game on a curved screen in VR.");
+                     : "XrAPI: menu; showing the game on a screen in VR.");
 }
 
 void VrBridge::OnDeviceCreated(IDirect3DDevice9* device, const D3DPRESENT_PARAMETERS& parameters) {
