@@ -30,6 +30,26 @@ files are included.
 - WinlatorXR Dawn (tested), or cats-27 (untested)
 - TrackMania Nations Forever and the TMLoader "prepackaged" zip
 
+## Container image (easiest)
+
+`TrackMania-VR.tzst` is a ready WinlatorXR container with TMFOXR and the
+tested settings. It contains no game files.
+
+1. In WinlatorXR, go to Containers → menu → **Import** and pick
+   `TrackMania-VR.tzst`.
+2. Start the **TrackMania VR** shortcut. On the first start it downloads
+   TrackMania Nations Forever from Nadeo's official server (530 MB, checked by
+   SHA-256), installs it to `C:\TmForever` and starts it. Later starts go
+   straight to the game.
+
+The image doesn't need TMLoader: TMFOXR loads as the game's `d3d9.dll`.
+Offline, put `tmnationsforever_setup.exe` into the headset's `Download`
+folder before the first start, and it is used instead of the download.
+
+The image is built with `scripts/build-quest-image.sh <exported.tzst>` from a
+container exported with WinlatorXR's "Export as Image". The script removes
+any game files, profile or cached installer and fails if traces remain.
+
 ## Downloads
 
 - `TMFOXR-Quest-Dawn-Beta-0.1.zip`, for WinlatorXR Dawn:
