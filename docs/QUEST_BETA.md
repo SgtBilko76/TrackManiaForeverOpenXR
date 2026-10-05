@@ -1,4 +1,4 @@
-# TMFOXR on Meta Quest (WinlatorXR) — Beta 0.1
+# TMFOXR on Meta Quest (WinlatorXR) — Beta 0.2
 
 TrackMania Nations Forever in VR, standalone on a Meta Quest 3 through
 [WinlatorXR](https://winlatorxr.github.io/) (Wine + Box64 + DXVK). No PC is
@@ -32,11 +32,11 @@ files are included.
 
 ## Container image (easiest)
 
-`TrackMania-VR.tzst` is a ready WinlatorXR container with TMFOXR and the
+`TrackMania-VR-Beta-0.2.tzst` is a ready WinlatorXR container with TMFOXR and the
 tested settings. It contains no game files.
 
 1. In WinlatorXR, go to Containers → menu → **Import** and pick
-   `TrackMania-VR.tzst`.
+   `TrackMania-VR-Beta-0.2.tzst`.
 2. Start the **TrackMania VR** shortcut. On the first start it downloads
    TrackMania Nations Forever from Nadeo's official server (530 MB, checked by
    SHA-256), installs it to `C:\TmForever` and starts it. Later starts go
@@ -52,11 +52,11 @@ any game files, profile or cached installer and fails if traces remain.
 
 ## Downloads
 
-- `TMFOXR-Quest-Dawn-Beta-0.1.zip`, for WinlatorXR Dawn:
+- `TMFOXR-Quest-Dawn-Beta-0.2.zip`, for WinlatorXR Dawn:
   1. Extract it into the game folder.
   2. Import the included shortcut profile.
   3. Follow `README_DAWN.txt`.
-- `TMFOXR-Quest-Installer-Beta-0.1.zip`, for WinlatorXR cats:
+- `TMFOXR-Quest-Installer-Beta-0.2.zip`, for WinlatorXR cats:
   1. Run `install.cmd` inside the container.
   2. Follow `README_INSTALL.txt`.
 

@@ -1,4 +1,4 @@
-TMFOXR - TRACKMANIA FOREVER VR (Meta Quest / WinlatorXR cats) - INSTALLER - BETA 0.1
+TMFOXR - TRACKMANIA FOREVER VR (Meta Quest / WinlatorXR cats) - INSTALLER - BETA 0.2
 =====================================================================================
 
 This package installs TMFOXR onto an EXISTING TrackMania Nations Forever
@@ -8,8 +8,13 @@ the game - use your own copy (free on Steam) with the TMLoader
 
 This is the package for the WinlatorXR "cats" builds (cats-27). It is
 UNTESTED on cats so far (TMFOXR was tested on WinlatorXR Dawn); please
-report how it goes. On Dawn use TMFOXR-Quest-Dawn-Beta-0.1.zip instead: it
+report how it goes. On Dawn use TMFOXR-Quest-Dawn-Beta-0.2.zip instead: it
 is extracted into the game folder and brings an importable shortcut profile.
+
+EASIEST: TrackMania-VR-Beta-0.2.tzst is a ready container image. Import it
+in WinlatorXR (Containers > Import) and start its "TrackMania VR" shortcut:
+it downloads TrackMania from Nadeo and sets everything up. This package is
+for setting TMFOXR up in your own container instead.
 
 Package contents:
   install.cmd          - the installer (run inside the container)
