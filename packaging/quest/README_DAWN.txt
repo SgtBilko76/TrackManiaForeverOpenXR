@@ -1,4 +1,4 @@
-TMFOXR - TRACKMANIA FOREVER VR - WinlatorXR DAWN PACKAGE - BETA 0.1
+TMFOXR - TRACKMANIA FOREVER VR - WinlatorXR DAWN PACKAGE - BETA 0.2
 ====================================================================
 
 TrackMania Nations Forever in VR, standalone on Meta Quest 3 through
@@ -7,7 +7,12 @@ finish screens stay in VR), the main menu on WinlatorXR's sharp flat
 screen, the Quest controllers as a gamepad. You need your own copy of
 TrackMania Nations Forever (free on Steam) and the TMLoader "prepackaged"
 mod loader. No game files are included. On the WinlatorXR cats builds use
-TMFOXR-Quest-Installer-Beta-0.1.zip instead (it has install.cmd).
+TMFOXR-Quest-Installer-Beta-0.2.zip instead (it has install.cmd).
+
+EASIEST: TrackMania-VR-Beta-0.2.tzst is a ready container image. Import it
+in WinlatorXR (Containers > Import) and start its "TrackMania VR" shortcut:
+it downloads TrackMania from Nadeo and sets everything up. This package is
+for setting TMFOXR up in your own container instead.
 
 
 WHAT IS IN HERE
