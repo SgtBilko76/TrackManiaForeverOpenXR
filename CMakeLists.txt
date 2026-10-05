@@ -92,7 +92,7 @@ if(TMFOXR_VR_BACKEND STREQUAL "XrAPI" AND MINGW)
   target_compile_features(tmfoxr_setup PRIVATE cxx_std_20)
   target_compile_options(tmfoxr_setup PRIVATE -municode)
   target_link_options(tmfoxr_setup PRIVATE -municode -static)
-  target_link_libraries(tmfoxr_setup PRIVATE urlmon bcrypt ole32 uuid)
+  target_link_libraries(tmfoxr_setup PRIVATE urlmon wininet bcrypt ole32 uuid)
 endif()
 
 if(MSVC)

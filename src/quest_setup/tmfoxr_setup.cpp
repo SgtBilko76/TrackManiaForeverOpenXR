@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <bcrypt.h>
 #include <urlmon.h>
+#include <wininet.h>
 
 #include "../large_address_aware.h"
 
@@ -155,7 +156,10 @@ std::wstring ObtainInstaller(const std::wstring& setupDir) {
         std::fflush(stdout);
         DeleteFileW(target.c_str());
         Progress progress;
-        if (FAILED(URLDownloadToFileW(nullptr, url, target.c_str(), 0, &progress))) {
+        const HRESULT downloaded = URLDownloadToFileW(nullptr, url, target.c_str(), 0, &progress);
+        // URLDownloadToFile also keeps a copy in the Internet cache (530 MB).
+        DeleteUrlCacheEntryW(url);
+        if (FAILED(downloaded)) {
             Say("  The download failed.");
             continue;
         }
