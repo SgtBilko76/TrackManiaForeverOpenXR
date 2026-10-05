@@ -83,6 +83,18 @@ if(MINGW)
   target_link_libraries(d3d9 PRIVATE dwmapi)
 endif()
 
+# First-start program of the WinlatorXR container image: downloads Nadeo's
+# TrackMania installer, installs the game and adds TMFOXR as its d3d9.dll.
+if(TMFOXR_VR_BACKEND STREQUAL "XrAPI" AND MINGW)
+  add_executable(tmfoxr_setup src/quest_setup/tmfoxr_setup.cpp src/large_address_aware.cpp)
+  target_include_directories(tmfoxr_setup PRIVATE src/compat/mingw)
+  set_target_properties(tmfoxr_setup PROPERTIES OUTPUT_NAME "TMFOXR-Setup")
+  target_compile_features(tmfoxr_setup PRIVATE cxx_std_20)
+  target_compile_options(tmfoxr_setup PRIVATE -municode)
+  target_link_options(tmfoxr_setup PRIVATE -municode -static)
+  target_link_libraries(tmfoxr_setup PRIVATE urlmon bcrypt ole32 uuid)
+endif()
+
 if(MSVC)
 add_executable(d3d9on12_compat_smoke EXCLUDE_FROM_ALL tests/d3d9on12_compat_smoke.cpp)
 target_compile_features(d3d9on12_compat_smoke PRIVATE cxx_std_20)
