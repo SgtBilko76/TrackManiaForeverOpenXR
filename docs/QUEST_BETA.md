@@ -1,5 +1,7 @@
 # TMFOXR on Meta Quest (WinlatorXR) — Beta 0.2
 
+**Download, install guide, controls and pictures: [portroyale.online/trackmania.html](https://portroyale.online/trackmania.html)**
+
 TrackMania Nations Forever in VR, standalone on a Meta Quest 3 through
 [WinlatorXR](https://winlatorxr.github.io/) (Wine + Box64 + DXVK). No PC is
 needed while playing. The mod is loaded by
