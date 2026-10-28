@@ -80,6 +80,8 @@ WinlatorXR crashed with screens wider than about 3500 pixels.
 
 ## Controls
 
+![TrackMania Nations Forever VR controller mapping](controls.webp)
+
 | Quest controller | In races | In menus |
 |---|---|---|
 | Left stick | Steer (analog) | Move through the menu, one step at a time |
